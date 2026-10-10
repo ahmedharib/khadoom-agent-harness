@@ -16,6 +16,7 @@ Khadoom AI is an intelligent co-pilot and mutation harness built for **Mtajir** 
 8. **Dual-Path Q&A Retrieval:** Platform questions query Mtajir documentation with semantic caching, while live store queries inspect current store data directly.
 9. **Token Usage & Cost Telemetry:** Real-time logging of prompt tokens, cached prompt tokens, completion tokens, execution latency, and exact USD cost calculations for `gpt-4o-mini` saved to append-only JSONL files (`data/logs/query-logs.jsonl`).
 10. **Predicate-Based Path Resolution:** Solves the positional array problem in RFC 6902. The LLM targets array entities by natural ID (e.g., `/paymentProviders[id=cod]/enabled` or `/products[id=prod_001]/price`), and the backend compiler resolves them to exact numeric indices before applying and staging.
+11. **Arithmetic Operations & Wildcard Expansion:** Native support for `increment`, `decrement`, and `percentage` (+/- X%) operations with automatic non-negative clamping for prices and inventory. Array wildcards (`/products[*]/price`) enable store-wide bulk changes in a single LLM call.
 
 ---
 

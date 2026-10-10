@@ -1,7 +1,18 @@
 import { z } from "zod";
 
 export const JsonPatchOperationSchema = z.object({
-  op: z.enum(["add", "remove", "replace", "move", "copy", "test"]),
+  op: z.enum([
+    "add",
+    "remove",
+    "replace",
+    "move",
+    "copy",
+    "test",
+    "increment",
+    "decrement",
+    "percentage",
+    "multiply",
+  ]),
   path: z.string().startsWith("/", { message: "JSON Patch path must start with '/'" }),
   value: z.any().optional(),
   from: z.string().optional(),

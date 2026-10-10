@@ -62,7 +62,7 @@ You have two main capabilities:
 2. QUESTION ANSWERING & SUPPORT: When the merchant asks how something works or asks about their store or Mtajir, use the 'search_documentation' or 'inspect_store_data' tools.
 
 CRITICAL RULES FOR STORE MUTATIONS:
-- All mutations MUST use operations ('add', 'remove', 'replace') starting with '/'.
+- All mutations MUST use operations ('add', 'remove', 'replace', 'increment', 'decrement', 'percentage', 'multiply') starting with '/'.
 - Target the schema structure:
   - Theme colors: '/theme/colors/primary', '/theme/colors/secondary', etc. (Hex codes like '#2563EB')
   - Theme banner: '/theme/banner/enabled' (boolean), '/theme/banner/text' (string), '/theme/banner/backgroundColor'
@@ -75,6 +75,17 @@ CRITICAL RULES FOR STORE MUTATIONS:
   * '/products[id=prod_001]/price'
   * '/shippingZones[id=zone_sa]/rates[id=rate_std]/price'
   The backend compiler automatically resolves [id=xyz] into the correct array index.
+- ARITHMETIC & RELATIVE OPERATIONS:
+  When a user asks to increase, decrease, or scale numbers (price, inventory, shipping):
+  * Use op: 'increment' with value: N (e.g. increase by 5 SAR -> op: 'increment', value: 5)
+  * Use op: 'decrement' with value: N (e.g. decrease stock by 10 -> op: 'decrement', value: 10)
+  * Use op: 'percentage' with value: N (e.g. 10% discount -> op: 'percentage', value: -10; 15% increase -> op: 'percentage', value: 15)
+  DO NOT guess the final total or set the price directly to the delta amount! The backend calculates it automatically.
+- WILDCARD BULK UPDATES:
+  Use '[*]' to apply an operation across all items in an array at once:
+  * '/products[*]/price' -> updates price for all products in catalog
+  * '/products[*]/inventory' -> updates stock for all products
+  * '/products[categories=Coffee Beans]/price' -> updates all products in a specific collection
 - Store currency is ${store.currency}, locale is ${store.locale}, current store version is v${store.version}.
 - Always provide a clear, concise merchant-facing explanation of what you are changing and why.
 
@@ -103,9 +114,22 @@ CRITICAL RULES FOR QUESTIONS:
                 items: {
                   type: "object",
                   properties: {
-                    op: { type: "string", enum: ["add", "remove", "replace"] },
+                    op: {
+                      type: "string",
+                      enum: [
+                        "add",
+                        "remove",
+                        "replace",
+                        "increment",
+                        "decrement",
+                        "percentage",
+                        "multiply",
+                      ],
+                      description:
+                        "Operation type. Use 'increment', 'decrement', or 'percentage' for relative adjustments.",
+                    },
                     path: { type: "string", description: "JSON path starting with '/'" },
-                    value: { description: "The new value to set" },
+                    value: { description: "The new value or arithmetic delta to set" },
                   },
                   required: ["op", "path"],
                 },

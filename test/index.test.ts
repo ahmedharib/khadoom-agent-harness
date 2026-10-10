@@ -238,11 +238,71 @@ async function runTests() {
     console.log("  Passed: Predicate mutation staged, compiled, and validated with semantic diff generated.");
   }
 
+  // Test 14: Arithmetic Operations (Increment, Decrement, Non-negative Clamping)
+  console.log("\nTest 14: Testing Arithmetic Ops (Increment, Decrement & Zero-Clamping)...");
+  const arithmeticPatches: JsonPatchOperation[] = [
+    { op: "increment", path: "/products[id=prod_001]/price", value: 5 }, // 65 + 5 = 70
+    { op: "decrement", path: "/products[id=prod_003]/inventory", value: 50 }, // 15 - 50 -> clamped to 0
+  ];
+  const arithmeticStageResult = await stagingService.stageMutation(
+    validStore.id,
+    rolledBack.version,
+    "Increase Ethiopian coffee price by 5 and reduce V60 stock with clamping",
+    arithmeticPatches
+  );
+  assert.equal(arithmeticStageResult.success, true);
+  if (arithmeticStageResult.success) {
+    assert.equal(arithmeticStageResult.session.stagedStore.products[0].price, 70);
+    assert.equal(arithmeticStageResult.session.stagedStore.products[2].inventory, 0); // clamped!
+    console.log("  Passed: Increment added delta correctly and decrement clamped at 0.");
+  }
+
+  // Test 15: Percentage Scaling Ops
+  console.log("\nTest 15: Testing Percentage Scaling (+10% markup and -20% discount)...");
+  const percentPatches: JsonPatchOperation[] = [
+    { op: "percentage", path: "/products[id=prod_001]/price", value: 10 }, // 65 * 1.1 = 71.5
+    { op: "percentage", path: "/products[id=prod_002]/price", value: -20 }, // 58 * 0.8 = 46.4
+  ];
+  const percentStageResult = await stagingService.stageMutation(
+    validStore.id,
+    rolledBack.version,
+    "Apply 10% markup on prod_001 and 20% discount on prod_002",
+    percentPatches
+  );
+  assert.equal(percentStageResult.success, true);
+  if (percentStageResult.success) {
+    assert.equal(percentStageResult.session.stagedStore.products[0].price, 71.5);
+    assert.equal(percentStageResult.session.stagedStore.products[1].price, 46.4);
+    console.log("  Passed: Percentage scaling calculated accurate prices (71.50 and 46.40 SAR).");
+  }
+
+  // Test 16: Wildcard Expansion across Array ([*])
+  console.log("\nTest 16: Testing Wildcard Expansion (/products[*]/price)...");
+  const wildcardPatches: JsonPatchOperation[] = [
+    { op: "percentage", path: "/products[*]/price", value: 10 },
+  ];
+  const wildcardStageResult = await stagingService.stageMutation(
+    validStore.id,
+    rolledBack.version,
+    "Apply 10% inflation adjustment across all catalog products",
+    wildcardPatches
+  );
+  assert.equal(wildcardStageResult.success, true);
+  if (wildcardStageResult.success) {
+    const session = wildcardStageResult.session;
+    // Store has 3 products, so exactly 3 compiled patches should be generated
+    assert.equal(session.patches.length, 3);
+    assert.equal(session.stagedStore.products[0].price, 71.5); // 65 * 1.1
+    assert.equal(session.stagedStore.products[1].price, 63.8); // 58 * 1.1
+    assert.equal(session.stagedStore.products[2].price, 99);   // 90 * 1.1
+    console.log(`  Passed: Wildcard expanded to all ${session.patches.length} products with exact RFC 6902 replacements.`);
+  }
+
   // Clean up test directory
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 13 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  console.log(" ALL 16 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 
