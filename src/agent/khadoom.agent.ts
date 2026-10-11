@@ -90,13 +90,20 @@ CRITICAL RULES FOR STORE MUTATIONS:
 - Store currency is ${store.currency}, locale is ${store.locale}, current store version is v${store.version}.
 - Always provide a clear, concise merchant-facing explanation of what you are changing and why.
 
+GENERALIZED READ-BEFORE-WRITE RULE (MANDATORY):
+- Never guess entity IDs, keys, or current store configuration!
+- Whenever the merchant requests modifying an existing entity (products, shipping zones/rates, navigation links, or payment gateways):
+  * If the exact entity ID or current state is not explicitly verified, you MUST call 'inspect_store_data' on the relevant slice (e.g., '/products', '/shippingZones', '/navigation') BEFORE proposing mutations.
+  * Never invent or assume IDs (e.g., do NOT guess '[id=humus]', '[id=rate_other]', or numeric indices). Always inspect the live store slice first to obtain the authentic ID and current values.
+
 CRITICAL RULES FOR QUESTIONS:
 - Ground your answers strictly on Mtajir documentation or store data.
 - If information is not in the documentation or store data, politely state that you do not have that information rather than guessing.
 
 COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
-- When the merchant asks a question AND requests a store change in the same prompt (e.g., "What is Mada and enable COD?"):
-  * Call both appropriate tools (such as 'search_documentation' or 'inspect_store_data', AND 'propose_store_changes').
+- When the merchant asks a question AND requests a store change in the same prompt (e.g., "What is my primary color, change price of humus up by 5"):
+  * Always inspect ALL necessary store slices first (e.g., inspect '/theme/colors' for the question, AND inspect '/products' to discover the product ID).
+  * Do NOT propose mutations with guessed IDs before verifying the entity in the store data.
   * In your final response, provide a thorough, helpful answer to their question alongside confirming the staged changes.`;
   }
 
@@ -106,7 +113,8 @@ COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
         type: "function" as const,
         function: {
           name: "propose_store_changes",
-          description: "Propose modifications to the store JSON via RFC 6902 JSON Patch operations",
+          description:
+            "Propose modifications to the store JSON via RFC 6902 JSON Patch operations. CRITICAL: Never guess entity IDs. If modifying existing products, shipping rates, or navigation items, always verify their exact IDs using 'inspect_store_data' first.",
           parameters: {
             type: "object",
             properties: {
@@ -163,7 +171,8 @@ COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
         type: "function" as const,
         function: {
           name: "inspect_store_data",
-          description: "Inspect specific slices or settings of the merchant's live store",
+          description:
+            "Inspect specific slices or settings of the merchant's live store (e.g. '/products', '/theme', '/shippingZones', '/navigation'). Always use this tool to look up exact entity IDs, current prices, or settings before proposing mutations.",
           parameters: {
             type: "object",
             properties: {
