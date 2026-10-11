@@ -112,55 +112,86 @@ async function main() {
       console.log(`\nKhadoom: Directed to screen '${response.navigationRoute}'.`);
       console.log(`Reason: ${response.message}`);
     } else if (response.type === "mutation_staged" && response.stagingSession) {
-      const session = response.stagingSession;
-      console.log("\n==================================================");
-      console.log("      REVERSIBLE STAGING PHASE (PROPOSED CHANGES) ");
-      console.log("==================================================");
-      console.log(`Summary: ${response.message}`);
-      if (response.retryCount && response.retryCount > 0) {
-        console.log(`(Auto-corrected after ${response.retryCount} schema validation retries)`);
-      }
-      console.log("\n--- Semantic Feature Comparison (Before vs After) ---");
-      session.semanticChanges.forEach((change, i) => {
-        console.log(`\n${i + 1}. [${change.category.toUpperCase()}] ${change.summary}`);
-        if (change.details.oldValue !== undefined) {
-          console.log(`   - Current: ${JSON.stringify(change.details.oldValue)}`);
-        }
-        if (change.details.newValue !== undefined) {
-          console.log(`   + Staged:  ${JSON.stringify(change.details.newValue)}`);
-        }
-      });
-      console.log("--------------------------------------------------");
+      let currentResponse = response;
 
-      // Human-in-the-Loop decision
-      const decision = await rl.question("\nAction: [A]ccept, [R]eject, or [M]odify? (A/R/M) > ");
-      const normalized = decision.trim().toUpperCase();
-
-      if (normalized === "A" || normalized === "ACCEPT") {
-        try {
-          const committed = await stagingService.commitSession(session.sessionId);
-          console.log(`[Success] Changes accepted and committed! Store is now live at version v${committed.version}.`);
-          console.log(`(Snapshot v${committed.version} created with full rollback support)`);
-        } catch (err: any) {
-          console.error(`[Commit Error] ${err.message}`);
+      while (currentResponse.type === "mutation_staged" && currentResponse.stagingSession) {
+        const session = currentResponse.stagingSession;
+        console.log("\n==================================================");
+        console.log("      REVERSIBLE STAGING PHASE (PROPOSED CHANGES) ");
+        console.log("==================================================");
+        console.log(`Summary: ${currentResponse.message}`);
+        if (currentResponse.retryCount && currentResponse.retryCount > 0) {
+          console.log(`(Auto-corrected after ${currentResponse.retryCount} schema validation retries)`);
         }
-      } else if (normalized === "M" || normalized === "MODIFY") {
-        const feedback = await rl.question("What would you like to modify in these changes? > ");
-        console.log("[Khadoom AI] Adjusting changes based on your feedback...");
-        const adjusted = await agent.processUserPrompt(
-          storeId,
-          `Modify previous proposal (${session.explanation}): ${feedback}`
-        );
-        console.log(adjusted.message);
-      } else {
-        stagingService.rejectSession(session.sessionId);
-        console.log("[Discarded] Proposed changes were rejected. Live store remains unchanged.");
+        console.log("\n--- Semantic Feature Comparison (Before vs After) ---");
+        session.semanticChanges.forEach((change, i) => {
+          console.log(`\n${i + 1}. [${change.category.toUpperCase()}] ${change.summary}`);
+          if (change.details.oldValue !== undefined) {
+            console.log(`   - Current: ${JSON.stringify(change.details.oldValue)}`);
+          }
+          if (change.details.newValue !== undefined) {
+            console.log(`   + Staged:  ${JSON.stringify(change.details.newValue)}`);
+          }
+        });
+        console.log("--------------------------------------------------");
+
+        if (currentResponse.telemetry) {
+          const t = currentResponse.telemetry;
+          console.log(
+            `\n[Telemetry] Model: ${t.model} | Latency: ${t.latencyMs}ms | Tokens: ${t.usage.promptTokens} in (${t.usage.cachedTokens} cached) / ${t.usage.completionTokens} out | Est. Cost: $${t.cost.totalCostUsd.toFixed(6)} USD`
+          );
+        }
+
+        // Human-in-the-Loop decision
+        const decision = await rl.question("\nAction: [A]ccept, [R]eject, or [M]odify? (A/R/M) > ");
+        const normalized = decision.trim().toUpperCase();
+
+        if (normalized === "A" || normalized === "ACCEPT") {
+          try {
+            const committed = await stagingService.commitSession(session.sessionId);
+            console.log(`[Success] Changes accepted and committed! Store is now live at version v${committed.version}.`);
+            console.log(`(Snapshot v${committed.version} created with full rollback support)`);
+          } catch (err: any) {
+            console.error(`[Commit Error] ${err.message}`);
+          }
+          break;
+        } else if (normalized === "M" || normalized === "MODIFY") {
+          const feedback = await rl.question("What would you like to modify in these changes? > ");
+          console.log("[Khadoom AI] Adjusting changes based on your feedback...");
+          stagingService.rejectSession(session.sessionId);
+          const adjusted = await agent.processUserPrompt(
+            storeId,
+            `Modify previous proposal (${session.explanation}): ${feedback}`
+          );
+          currentResponse = adjusted;
+
+          if (adjusted.type !== "mutation_staged") {
+            if (adjusted.type === "answer") {
+              console.log(`\nKhadoom: ${adjusted.message}`);
+            } else if (adjusted.type === "navigation") {
+              console.log(`\nKhadoom: Directed to screen '${adjusted.navigationRoute}'. Reason: ${adjusted.message}`);
+            } else if (adjusted.type === "error") {
+              console.error(`\n[Error] ${adjusted.message}`);
+            }
+            if (adjusted.telemetry) {
+              const t = adjusted.telemetry;
+              console.log(
+                `\n[Telemetry] Model: ${t.model} | Latency: ${t.latencyMs}ms | Tokens: ${t.usage.promptTokens} in (${t.usage.cachedTokens} cached) / ${t.usage.completionTokens} out | Est. Cost: $${t.cost.totalCostUsd.toFixed(6)} USD`
+              );
+            }
+            break;
+          }
+        } else {
+          stagingService.rejectSession(session.sessionId);
+          console.log("[Discarded] Proposed changes were rejected. Live store remains unchanged.");
+          break;
+        }
       }
     } else if (response.type === "error") {
       console.error(`\n[Error] ${response.message}`);
     }
 
-    if (response.telemetry) {
+    if (response.type !== "mutation_staged" && response.telemetry) {
       const t = response.telemetry;
       console.log(
         `\n[Telemetry] Model: ${t.model} | Latency: ${t.latencyMs}ms | Tokens: ${t.usage.promptTokens} in (${t.usage.cachedTokens} cached) / ${t.usage.completionTokens} out | Est. Cost: $${t.cost.totalCostUsd.toFixed(6)} USD`
