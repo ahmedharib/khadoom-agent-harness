@@ -95,10 +95,23 @@ export class StoreRepository {
       throw new Error(`Store with id '${storeId}' does not exist`);
     }
 
-    // Optimistic Concurrency check
-    if (updatedStore.version <= current.version) {
-      updatedStore.version = current.version + 1;
+    // Load changelog to compute the high-water mark version
+    let changelog: VersionChangelogEntry[] = [];
+    try {
+      const existingChangelog = await fs.readFile(this.getChangelogPath(storeId), "utf-8");
+      changelog = JSON.parse(existingChangelog);
+    } catch {
+      changelog = [];
     }
+
+    // High-water mark: strictly increment past the highest version number ever created
+    const highestRecordedVersion = changelog.reduce(
+      (max, entry) => Math.max(max, entry.version),
+      current.version
+    );
+    const nextVersion = highestRecordedVersion + 1;
+
+    updatedStore.version = nextVersion;
     updatedStore.updatedAt = new Date().toISOString();
 
     const validated = MtajirStoreSchema.parse(updatedStore);
@@ -110,26 +123,23 @@ export class StoreRepository {
       "utf-8"
     );
 
-    // Save snapshot
+    // Save snapshot for the new unique version
     const snapshotPath = path.join(
       this.getStoreSnapshotsDir(storeId),
       `v${validated.version}.json`
     );
     await fs.writeFile(snapshotPath, JSON.stringify(validated, null, 2), "utf-8");
 
-    // Append to changelog
-    let changelog: VersionChangelogEntry[] = [];
-    try {
-      const existingChangelog = await fs.readFile(this.getChangelogPath(storeId), "utf-8");
-      changelog = JSON.parse(existingChangelog);
-    } catch {
-      changelog = [];
-    }
+    // Append to changelog (with base version reference if it diverged from latest)
+    const baseNote =
+      current.version !== highestRecordedVersion
+        ? ` [based on rollback to v${current.version}]`
+        : "";
 
     changelog.push({
       version: validated.version,
       timestamp: validated.updatedAt,
-      explanation,
+      explanation: `${explanation}${baseNote}`,
       patches: appliedPatches,
     });
 
@@ -174,7 +184,8 @@ export class StoreRepository {
       "utf-8"
     );
 
-    // Filter changelog to targetVersion so history is accurately reset
+    // Preserve full changelog history so past snapshots are never lost,
+    // and record an audit log entry for the rollback event
     let changelog: VersionChangelogEntry[] = [];
     try {
       changelog = JSON.parse(await fs.readFile(this.getChangelogPath(storeId), "utf-8"));
@@ -182,7 +193,12 @@ export class StoreRepository {
       changelog = [];
     }
 
-    changelog = changelog.filter((entry) => entry.version <= targetVersion);
+    changelog.push({
+      version: targetVersion,
+      timestamp: validated.updatedAt,
+      explanation: `Rolled back live store to state of v${targetVersion}`,
+      patches: [],
+    });
 
     await fs.writeFile(
       this.getChangelogPath(storeId),

@@ -113,8 +113,9 @@ async function runTests() {
   assert.equal(rolledBack.theme.banner.enabled, false);
 
   const changelog = await repository.getChangelog(validStore.id);
-  assert.equal(changelog.length, 1);
-  console.log("  Passed: Rollback successfully restored v1 state without creating a new version.");
+  assert.equal(changelog.length, 3); // v1, v2, and rollback audit entry preserved
+  assert.equal(changelog[2].explanation.includes("Rolled back"), true);
+  console.log("  Passed: Rollback successfully restored v1 state with history preserved.");
 
   // Test 9: Mtajir Documentation RAG & Semantic Cache
   console.log("\nTest 9: Verifying Documentation Search & Caching...");
@@ -352,11 +353,51 @@ async function runTests() {
   assert.equal(rollbackPromptRes.message.includes("/history"), true);
   console.log("  Passed: Agent properly directed merchant to use the CLI '/rollback' command.");
 
+  // Test 20: Commit after Rollback Increments from High-Water Mark (Never Overwriting Existing Versions)
+  console.log("\nTest 20: Testing Commit After Rollback Increments from High-Water Mark...");
+  // Store is currently live at v1 (after rollback from v2).
+  const postRollbackPatches: JsonPatchOperation[] = [
+    { op: "replace", path: "/theme/banner/backgroundColor", value: "#10B981" },
+  ];
+  const postRollbackStage = await stagingService.stageMutation(
+    validStore.id,
+    1,
+    "Update banner background to emerald green",
+    postRollbackPatches
+  );
+  assert.equal(postRollbackStage.success, true);
+  if (postRollbackStage.success) {
+    const committedV3 = await stagingService.commitSession(postRollbackStage.session.sessionId);
+    // Crucial: Must be v3, NOT v2! It must increment past highest recorded version (v2)
+    assert.equal(committedV3.version, 3);
+    assert.equal(committedV3.theme.banner.backgroundColor, "#10B981");
+
+    // Verify v2 snapshot is intact and was NOT overwritten
+    const v2SnapshotRaw = await fs.readFile(
+      path.join(testDir, validStore.id, "snapshots", "v2.json"),
+      "utf-8"
+    );
+    const v2Snapshot = JSON.parse(v2SnapshotRaw);
+    assert.equal(v2Snapshot.version, 2);
+    assert.equal(v2Snapshot.theme.colors.primary, "#2563EB");
+
+    // Verify v3 snapshot was created
+    const v3SnapshotRaw = await fs.readFile(
+      path.join(testDir, validStore.id, "snapshots", "v3.json"),
+      "utf-8"
+    );
+    const v3Snapshot = JSON.parse(v3SnapshotRaw);
+    assert.equal(v3Snapshot.version, 3);
+    assert.equal(v3Snapshot.theme.banner.backgroundColor, "#10B981");
+
+    console.log("  Passed: New commit branched from v1 successfully became v3 without overwriting v2.");
+  }
+
   // Clean up test directory
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 19 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  console.log(" ALL 20 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 
