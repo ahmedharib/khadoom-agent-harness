@@ -109,13 +109,27 @@ async function main() {
         console.log(`(Sources: ${response.citations.join(", ")})`);
       }
     } else if (response.type === "navigation") {
+      if (response.answerText) {
+        console.log(`\nKhadoom: ${response.answerText}`);
+      }
       console.log(`\nKhadoom: Directed to screen '${response.navigationRoute}'.`);
       console.log(`Reason: ${response.message}`);
+      if (response.citations && response.citations.length > 0) {
+        console.log(`(Sources: ${response.citations.join(", ")})`);
+      }
     } else if (response.type === "mutation_staged" && response.stagingSession) {
       let currentResponse = response;
 
       while (currentResponse.type === "mutation_staged" && currentResponse.stagingSession) {
         const session = currentResponse.stagingSession;
+
+        if (currentResponse.answerText) {
+          console.log(`\nKhadoom: ${currentResponse.answerText}`);
+          if (currentResponse.citations && currentResponse.citations.length > 0) {
+            console.log(`(Sources: ${currentResponse.citations.join(", ")})`);
+          }
+        }
+
         console.log("\n==================================================");
         console.log("      REVERSIBLE STAGING PHASE (PROPOSED CHANGES) ");
         console.log("==================================================");

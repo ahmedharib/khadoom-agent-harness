@@ -14,6 +14,7 @@ import {
   TokenUsage,
 } from "../src/telemetry/query-logger.js";
 import { compilePredicatePath } from "../src/patch/patch-compiler.js";
+import { AgentResponse } from "../src/agent/khadoom.agent.js";
 
 async function runTests() {
   console.log("Starting Khadoom AI Harness Verification Tests...\n");
@@ -298,11 +299,28 @@ async function runTests() {
     console.log(`  Passed: Wildcard expanded to all ${session.patches.length} products with exact RFC 6902 replacements.`);
   }
 
+  // Test 17: Verifying Compound Prompt AgentResponse Data Contract
+  console.log("\nTest 17: Verifying Compound Prompt AgentResponse Data Contract...");
+  const compoundResponse: AgentResponse = {
+    type: "mutation_staged",
+    message: "Staged 1 change: Enabled Cash on Delivery payment provider",
+    answerText:
+      "Mada is the local debit card payment network in Saudi Arabia that allows customers to pay online using ATM cards. I have also staged enabling Cash on Delivery for your store.",
+    citations: ["Configuring Payment Gateways in Mtajir"],
+    stagingSession: wildcardStageResult.success ? wildcardStageResult.session : undefined,
+  };
+  assert.equal(compoundResponse.type, "mutation_staged");
+  assert.ok(compoundResponse.stagingSession);
+  assert.ok(compoundResponse.answerText);
+  assert.equal(compoundResponse.answerText.includes("Mada is the local debit"), true);
+  assert.equal(compoundResponse.citations?.[0], "Configuring Payment Gateways in Mtajir");
+  console.log("  Passed: Compound response preserves text Q&A answer, citations, and staged mutation session.");
+
   // Clean up test directory
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 16 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  console.log(" ALL 17 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 

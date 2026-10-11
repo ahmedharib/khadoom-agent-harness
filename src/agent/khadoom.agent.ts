@@ -22,6 +22,7 @@ export interface AgentTelemetry {
 export interface AgentResponse {
   type: "answer" | "mutation_staged" | "navigation" | "error";
   message: string;
+  answerText?: string;
   stagingSession?: StagingSession;
   navigationRoute?: string;
   citations?: string[];
@@ -91,7 +92,12 @@ CRITICAL RULES FOR STORE MUTATIONS:
 
 CRITICAL RULES FOR QUESTIONS:
 - Ground your answers strictly on Mtajir documentation or store data.
-- If information is not in the documentation or store data, politely state that you do not have that information rather than guessing.`;
+- If information is not in the documentation or store data, politely state that you do not have that information rather than guessing.
+
+COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
+- When the merchant asks a question AND requests a store change in the same prompt (e.g., "What is Mada and enable COD?"):
+  * Call both appropriate tools (such as 'search_documentation' or 'inspect_store_data', AND 'propose_store_changes').
+  * In your final response, provide a thorough, helpful answer to their question alongside confirming the staged changes.`;
   }
 
   private getToolDefinitions() {
@@ -273,6 +279,8 @@ CRITICAL RULES FOR QUESTIONS:
       const maxTurns = 6;
       const executedTools: string[] = [];
       const citations: string[] = [];
+      let activeStagedMutation: AgentResponse | null = null;
+      let activeNavigation: { route: string; reason: string } | null = null;
 
       while (turns < maxTurns) {
         turns++;
@@ -294,6 +302,44 @@ CRITICAL RULES FOR QUESTIONS:
 
         // If no tool calls, model gave its final conversational reply
         if (!message.tool_calls || message.tool_calls.length === 0) {
+          if (activeStagedMutation && activeStagedMutation.type === "mutation_staged") {
+            return await finalize(
+              {
+                ...activeStagedMutation,
+                answerText: message.content || undefined,
+                citations: citations.length > 0 ? citations : undefined,
+              },
+              "mutation",
+              executedTools
+            );
+          }
+
+          if (activeStagedMutation && activeStagedMutation.type === "error") {
+            return await finalize(
+              {
+                type: "error",
+                message: message.content || activeStagedMutation.message,
+                citations: citations.length > 0 ? citations : undefined,
+              },
+              "error",
+              executedTools
+            );
+          }
+
+          if (activeNavigation) {
+            return await finalize(
+              {
+                type: "navigation",
+                navigationRoute: activeNavigation.route,
+                message: activeNavigation.reason,
+                answerText: message.content || undefined,
+                citations: citations.length > 0 ? citations : undefined,
+              },
+              "navigation",
+              executedTools
+            );
+          }
+
           const finalIntent: QueryIntentType =
             citations.length > 0
               ? "doc_question"
@@ -319,9 +365,6 @@ CRITICAL RULES FOR QUESTIONS:
         }
 
         // Process all tool calls in the message, responding to each tool_call_id
-        let stagedMutationResponse: AgentResponse | null = null;
-        let navigationResult: { route: string; reason: string } | null = null;
-
         for (const toolCall of message.tool_calls) {
           const fnName = toolCall.function.name;
           executedTools.push(fnName);
@@ -337,7 +380,7 @@ CRITICAL RULES FOR QUESTIONS:
               store,
               addUsage
             );
-            stagedMutationResponse = mutationRes;
+            activeStagedMutation = mutationRes;
 
             messages.push({
               role: "tool",
@@ -369,7 +412,7 @@ CRITICAL RULES FOR QUESTIONS:
               content: JSON.stringify(dataSlice ?? "Not found", null, 2),
             });
           } else if (fnName === "navigate_to_settings_page") {
-            navigationResult = { route: args.route, reason: args.reason };
+            activeNavigation = { route: args.route, reason: args.reason };
             messages.push({
               role: "tool",
               tool_call_id: toolCall.id,
@@ -383,24 +426,30 @@ CRITICAL RULES FOR QUESTIONS:
             });
           }
         }
+      }
 
-        // If this turn produced a staged mutation, return immediately to user
-        if (stagedMutationResponse) {
-          return await finalize(stagedMutationResponse, "mutation", executedTools);
-        }
+      if (activeStagedMutation && activeStagedMutation.type === "mutation_staged") {
+        return await finalize(
+          {
+            ...activeStagedMutation,
+            citations: citations.length > 0 ? citations : undefined,
+          },
+          "mutation",
+          executedTools
+        );
+      }
 
-        // If this turn was a navigation action, return immediately to user
-        if (navigationResult) {
-          return await finalize(
-            {
-              type: "navigation",
-              navigationRoute: navigationResult.route,
-              message: navigationResult.reason,
-            },
-            "navigation",
-            executedTools
-          );
-        }
+      if (activeNavigation) {
+        return await finalize(
+          {
+            type: "navigation",
+            navigationRoute: activeNavigation.route,
+            message: activeNavigation.reason,
+            citations: citations.length > 0 ? citations : undefined,
+          },
+          "navigation",
+          executedTools
+        );
       }
 
       return await finalize(
