@@ -22,6 +22,45 @@ function getValueAtPath(obj: any, path: string): any {
   return curr;
 }
 
+export function isDeepEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (typeof a === "string" && typeof b === "string") {
+    return a.trim().toLowerCase() === b.trim().toLowerCase();
+  }
+  if (typeof a === "number" && typeof b === "number") {
+    return a === b;
+  }
+  if (typeof a === "boolean" && typeof b === "boolean") {
+    return a === b;
+  }
+  if (typeof a === "object" && typeof b === "object" && a !== null && b !== null) {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+  return false;
+}
+
+export function isNoOpPatch(originalStore: any, patch: JsonPatchOperation): boolean {
+  const { op, path, value } = patch;
+  const oldValue = getValueAtPath(originalStore, path);
+
+  if (op === "replace") {
+    return isDeepEqual(oldValue, value);
+  }
+
+  if (op === "add") {
+    if (oldValue !== undefined) {
+      return isDeepEqual(oldValue, value);
+    }
+    return false;
+  }
+
+  if (op === "remove") {
+    return oldValue === undefined;
+  }
+
+  return false;
+}
+
 export function generateSemanticDiff(
   originalStore: MtajirStore,
   patches: JsonPatchOperation[]
@@ -29,6 +68,10 @@ export function generateSemanticDiff(
   const items: SemanticChangeItem[] = [];
 
   for (const patch of patches) {
+    if (isNoOpPatch(originalStore, patch)) {
+      continue;
+    }
+
     const { op, path, value } = patch;
     const oldValue = getValueAtPath(originalStore, path);
 

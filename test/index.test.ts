@@ -14,7 +14,7 @@ import {
   TokenUsage,
 } from "../src/telemetry/query-logger.js";
 import { compilePredicatePath } from "../src/patch/patch-compiler.js";
-import { AgentResponse } from "../src/agent/khadoom.agent.js";
+import { AgentResponse, KhadoomAgent } from "../src/agent/khadoom.agent.js";
 
 async function runTests() {
   console.log("Starting Khadoom AI Harness Verification Tests...\n");
@@ -108,13 +108,13 @@ async function runTests() {
   // Test 8: Instant Rollback (v2 -> v1 rollback state)
   console.log("\nTest 8: Testing Store Rollback to v1...");
   const rolledBack = await repository.rollbackToVersion(validStore.id, 1);
-  assert.equal(rolledBack.version, 3); // rollback creates a new version preserving history
+  assert.equal(rolledBack.version, 1); // target version restored directly without creating a new version
   assert.equal(rolledBack.theme.colors.primary, "#1E293B"); // original color restored!
   assert.equal(rolledBack.theme.banner.enabled, false);
 
   const changelog = await repository.getChangelog(validStore.id);
-  assert.equal(changelog.length, 3);
-  console.log("  Passed: Rollback successfully restored v1 state with audit trail preserved.");
+  assert.equal(changelog.length, 1);
+  console.log("  Passed: Rollback successfully restored v1 state without creating a new version.");
 
   // Test 9: Mtajir Documentation RAG & Semantic Cache
   console.log("\nTest 9: Verifying Documentation Search & Caching...");
@@ -316,11 +316,47 @@ async function runTests() {
   assert.equal(compoundResponse.citations?.[0], "Configuring Payment Gateways in Mtajir");
   console.log("  Passed: Compound response preserves text Q&A answer, citations, and staged mutation session.");
 
+  // Test 18: Preventing No-Op / Redundant Modifications (e.g. #1E293B to #1E293B)
+  console.log("\nTest 18: Testing No-Op / Redundant Modification Prevention...");
+  const noOpPatches: JsonPatchOperation[] = [
+    { op: "replace", path: "/theme/colors/primary", value: "#1E293B" }, // already #1E293B
+  ];
+  const noOpResult = await stagingService.stageMutation(
+    validStore.id,
+    rolledBack.version,
+    "Change primary color to #1E293B",
+    noOpPatches
+  );
+  assert.equal(noOpResult.success, false);
+  if (!noOpResult.success) {
+    assert.equal(noOpResult.errorType, "NO_OP");
+    assert.equal(noOpResult.errorMessage.includes("No changes detected"), true);
+  }
+  const noOpDiff = generateSemanticDiff(validStore, noOpPatches);
+  assert.equal(noOpDiff.length, 0);
+  console.log("  Passed: Staging blocked redundant #1E293B -> #1E293B mutation with NO_OP status.");
+
+  // Test 19: Rollback Prompt Guidance (directing user to /rollback command)
+  console.log("\nTest 19: Testing Rollback Prompt Guidance (/rollback command)...");
+  const queryLogger = new QueryLoggerService(path.join(testDir, "query-logs.jsonl"));
+  const agent = new KhadoomAgent(
+    repository,
+    stagingService,
+    docsService,
+    queryLogger,
+    "mock-key"
+  );
+  const rollbackPromptRes = await agent.processUserPrompt(validStore.id, "rollback 1");
+  assert.equal(rollbackPromptRes.type, "answer");
+  assert.equal(rollbackPromptRes.message.includes("/rollback"), true);
+  assert.equal(rollbackPromptRes.message.includes("/history"), true);
+  console.log("  Passed: Agent properly directed merchant to use the CLI '/rollback' command.");
+
   // Clean up test directory
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 17 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  console.log(" ALL 19 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 

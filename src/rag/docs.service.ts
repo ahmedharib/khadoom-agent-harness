@@ -44,7 +44,7 @@ export const MTAJIR_DOCUMENTATION: DocArticle[] = [
     category: "System",
     title: "Store Versioning and Safe Rollbacks",
     content:
-      "Every time a store update is accepted in the staging phase, Mtajir automatically snapshots the entire store state into an immutable version. If you make a mistake, you can roll back to any previous version in one click without data loss.",
+      "Every time a store update is accepted in the staging phase, Mtajir automatically snapshots the entire store state into an immutable version. If you make a mistake, you can roll back to any previous version by using the CLI command '/rollback <version_number>' (e.g., '/rollback 1'). You can also view all past versions and audit trails by running '/history'.",
     tags: ["versioning", "rollback", "snapshots", "history", "staging"],
   },
 ];

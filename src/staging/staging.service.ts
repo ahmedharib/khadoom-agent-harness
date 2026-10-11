@@ -26,7 +26,7 @@ export type StagingResult =
     }
   | {
       success: false;
-      errorType: "CONCURRENCY_CONFLICT" | "PATCH_APPLICATION_ERROR" | "ZOD_VALIDATION_ERROR";
+      errorType: "NO_OP" | "CONCURRENCY_CONFLICT" | "PATCH_APPLICATION_ERROR" | "ZOD_VALIDATION_ERROR";
       errorMessage: string;
       zodIssues?: z.ZodIssue[];
       appliedPatches: JsonPatchOperation[];
@@ -104,7 +104,17 @@ export class StagingService {
     // 6. Build Semantic Diff
     const semanticChanges = generateSemanticDiff(currentStore, compiledPatches);
 
-    // 7. Create Staging Session
+    // 7. Prevent No-Op / Redundant Modifications
+    if (semanticChanges.length === 0) {
+      return {
+        success: false,
+        errorType: "NO_OP",
+        errorMessage: "No changes detected: the requested values match the current store state.",
+        appliedPatches: compiledPatches,
+      };
+    }
+
+    // 8. Create Staging Session
     const sessionId = `staging_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const session: StagingSession = {
       sessionId,

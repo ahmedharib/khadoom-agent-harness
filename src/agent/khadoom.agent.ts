@@ -104,7 +104,14 @@ COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
 - When the merchant asks a question AND requests a store change in the same prompt (e.g., "What is my primary color, change price of humus up by 5"):
   * Always inspect ALL necessary store slices first (e.g., inspect '/theme/colors' for the question, AND inspect '/products' to discover the product ID).
   * Do NOT propose mutations with guessed IDs before verifying the entity in the store data.
-  * In your final response, provide a thorough, helpful answer to their question alongside confirming the staged changes.`;
+  * In your final response, provide a thorough, helpful answer to their question alongside confirming the staged changes.
+
+ROLLBACK & VERSION REVERSIONS:
+- Version rollbacks are handled deterministically via CLI commands, NOT through AI patches.
+- If the merchant asks to rollback, undo, or revert to a previous version (e.g., "rollback to v1", "revert to version 2", "rollback 16", "undo changes"):
+  * Do NOT call 'propose_store_changes' or generate reverse patches.
+  * Explicitly instruct the merchant to use the CLI '/rollback <version>' command (e.g., '/rollback 1').
+  * Inform them that they can type '/history' to see all previous snapshots and their version numbers.`;
   }
 
   private getToolDefinitions() {
@@ -278,6 +285,21 @@ COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
       );
     }
 
+    // 2. Direct Rollback command guidance check
+    const rollbackMatch = userPrompt
+      .trim()
+      .match(/^(?:can\s+you\s+)?(?:please\s+)?(?:rollback|revert|undo)(?:\s+(?:the\s+)?(?:store\s+)?(?:to\s+)?)?(?:v(?:ersion)?\s*)?(\d+)?$/i);
+    if (rollbackMatch) {
+      const targetVer = rollbackMatch[1] ? rollbackMatch[1] : "<version_number>";
+      return await finalize(
+        {
+          type: "answer",
+          message: `To safely restore a previous store snapshot, please use the CLI command: '/rollback ${targetVer}' (e.g., '/rollback ${targetVer}'). You can also view all past snapshots and changelogs by typing '/history'.`,
+        },
+        "conversation"
+      );
+    }
+
     const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
       { role: "system", content: this.getSystemPrompt(store) },
       { role: "user", content: userPrompt },
@@ -319,6 +341,18 @@ COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
                 citations: citations.length > 0 ? citations : undefined,
               },
               "mutation",
+              executedTools
+            );
+          }
+
+          if (activeStagedMutation && activeStagedMutation.type === "answer") {
+            return await finalize(
+              {
+                type: "answer",
+                message: message.content || activeStagedMutation.message,
+                citations: citations.length > 0 ? citations : undefined,
+              },
+              "conversation",
               executedTools
             );
           }
@@ -395,7 +429,12 @@ COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
               role: "tool",
               tool_call_id: toolCall.id,
               content: JSON.stringify({
-                status: mutationRes.type === "mutation_staged" ? "staged_successfully" : "error",
+                status:
+                  mutationRes.type === "mutation_staged"
+                    ? "staged_successfully"
+                    : mutationRes.type === "answer"
+                    ? "no_op"
+                    : "error",
                 message: mutationRes.message,
               }),
             });
@@ -444,6 +483,18 @@ COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
             citations: citations.length > 0 ? citations : undefined,
           },
           "mutation",
+          executedTools
+        );
+      }
+
+      if (activeStagedMutation && activeStagedMutation.type === "answer") {
+        return await finalize(
+          {
+            type: "answer",
+            message: activeStagedMutation.message,
+            citations: citations.length > 0 ? citations : undefined,
+          },
+          "conversation",
           executedTools
         );
       }
@@ -514,6 +565,13 @@ COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
           message: currentExplanation,
           stagingSession: stageResult.session,
           retryCount: attempts,
+        };
+      }
+
+      if (stageResult.errorType === "NO_OP") {
+        return {
+          type: "answer",
+          message: stageResult.errorMessage,
         };
       }
 

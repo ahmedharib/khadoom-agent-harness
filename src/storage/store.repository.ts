@@ -161,26 +161,20 @@ export class StoreRepository {
     }
 
     const restoredStore: MtajirStore = JSON.parse(snapshotData);
-    const newVersion = current.version + 1;
-    restoredStore.version = newVersion;
+    // Restore directly to targetVersion without creating a new version
+    restoredStore.version = targetVersion;
     restoredStore.updatedAt = new Date().toISOString();
 
     const validated = MtajirStoreSchema.parse(restoredStore);
 
+    // Overwrite the live store file
     await fs.writeFile(
       this.getStoreFilePath(storeId),
       JSON.stringify(validated, null, 2),
       "utf-8"
     );
 
-    // Save new snapshot
-    const newSnapshotPath = path.join(
-      this.getStoreSnapshotsDir(storeId),
-      `v${newVersion}.json`
-    );
-    await fs.writeFile(newSnapshotPath, JSON.stringify(validated, null, 2), "utf-8");
-
-    // Append changelog entry
+    // Filter changelog to targetVersion so history is accurately reset
     let changelog: VersionChangelogEntry[] = [];
     try {
       changelog = JSON.parse(await fs.readFile(this.getChangelogPath(storeId), "utf-8"));
@@ -188,12 +182,7 @@ export class StoreRepository {
       changelog = [];
     }
 
-    changelog.push({
-      version: newVersion,
-      timestamp: validated.updatedAt,
-      explanation: `Rolled back to state of v${targetVersion}`,
-      patches: [],
-    });
+    changelog = changelog.filter((entry) => entry.version <= targetVersion);
 
     await fs.writeFile(
       this.getChangelogPath(storeId),
