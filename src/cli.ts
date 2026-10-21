@@ -8,7 +8,12 @@ import { KhadoomAgent } from "./agent/khadoom.agent.js";
 import { QueryLoggerService } from "./telemetry/query-logger.js";
 import { SEED_STORE } from "./data/seed-store.js";
 
-dotenv.config();
+dotenv.config({ override: true });
+
+if (!process.env.OPENAI_API_KEY) {
+  console.warn("\n[Warning] OPENAI_API_KEY is not defined in your environment or .env file.");
+  console.warn("Please add OPENAI_API_KEY=sk-... to your .env file.\n");
+}
 
 async function main() {
   const rl = readline.createInterface({ input, output });
