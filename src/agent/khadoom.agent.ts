@@ -87,6 +87,7 @@ CRITICAL RULES FOR STORE MUTATIONS:
   * '/products[*]/price' -> updates price for all products in catalog
   * '/products[*]/inventory' -> updates stock for all products
   * '/products[categories=Coffee Beans]/price' -> updates all products in a specific collection
+- Store name is "${store.name}", description is "${store.description || "No description set"}".
 - Store currency is ${store.currency}, locale is ${store.locale}, current store version is v${store.version}.
 - Always provide a clear, concise merchant-facing explanation of what you are changing and why.
 
@@ -179,11 +180,11 @@ ROLLBACK & VERSION REVERSIONS:
         function: {
           name: "inspect_store_data",
           description:
-            "Inspect specific slices or settings of the merchant's live store (e.g. '/products', '/theme', '/shippingZones', '/navigation'). Always use this tool to look up exact entity IDs, current prices, or settings before proposing mutations.",
+            "Inspect specific slices, settings, or metadata of the merchant's live store (e.g. '/', '/name', '/description', '/products', '/theme', '/shippingZones', '/navigation'). Use this tool to look up live configuration or to verify exact entity IDs and current prices before proposing mutations.",
           parameters: {
             type: "object",
             properties: {
-              path: { type: "string", description: "JSON path to inspect, e.g. '/theme' or '/shippingZones'" },
+              path: { type: "string", description: "JSON path to inspect, e.g. '/', '/name', '/description', '/theme', or '/shippingZones'" },
             },
           },
         },
@@ -635,7 +636,9 @@ Please output a corrected RFC 6902 patch that satisfies the schema constraints a
   }
 
   private getValueAtPath(obj: any, path: string): any {
-    const parts = path.split("/").filter(Boolean);
+    const normalizedPath = path.replace(/^\/store(?=\/|$)/i, "");
+    const parts = normalizedPath.split("/").filter(Boolean);
+    if (parts.length === 0) return obj;
     let curr = obj;
     for (const part of parts) {
       if (curr === undefined || curr === null) return undefined;
