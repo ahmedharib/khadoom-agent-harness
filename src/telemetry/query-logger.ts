@@ -1,5 +1,27 @@
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+export function resolveDefaultQueryLogPath(): string {
+  const cwdCandidate = path.join(process.cwd(), "data", "logs", "query-logs.jsonl");
+  if (fsSync.existsSync(cwdCandidate)) {
+    return cwdCandidate;
+  }
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const pkgRootCandidate = path.resolve(__dirname, "..", "..", "data", "logs", "query-logs.jsonl");
+  if (fsSync.existsSync(pkgRootCandidate)) {
+    return pkgRootCandidate;
+  }
+  const harnessCandidate = path.join(process.cwd(), "khadoom-agent-harness", "data", "logs", "query-logs.jsonl");
+  if (fsSync.existsSync(harnessCandidate)) {
+    return harnessCandidate;
+  }
+  if (fsSync.existsSync(path.resolve(__dirname, "..", "..", "data"))) {
+    return pkgRootCandidate;
+  }
+  return cwdCandidate;
+}
 
 export interface ModelPricingTier {
   inputPerMillion: number;
@@ -94,7 +116,7 @@ export function calculateCost(model: string, usage: TokenUsage): CostBreakdown {
 export class QueryLoggerService {
   private logFilePath: string;
 
-  constructor(logFilePath = path.join(process.cwd(), "data", "logs", "query-logs.jsonl")) {
+  constructor(logFilePath = resolveDefaultQueryLogPath()) {
     this.logFilePath = logFilePath;
   }
 

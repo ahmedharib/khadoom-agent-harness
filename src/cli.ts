@@ -25,6 +25,7 @@ async function main() {
   const repository = new StoreRepository();
   const stagingService = new StagingService(repository);
   const docsService = new DocsService();
+  await docsService.syncCorpusAndEmbeddings();
   const queryLogger = new QueryLoggerService();
   const agent = new KhadoomAgent(repository, stagingService, docsService, queryLogger);
 

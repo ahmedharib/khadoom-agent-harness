@@ -4,6 +4,7 @@ import { StagingService, StagingSession } from "../staging/staging.service.js";
 import { DocsService } from "../rag/docs.service.js";
 import { JsonPatchOperation } from "../schema/patch.schema.js";
 import { MtajirStore } from "../schema/store.schema.js";
+import { compilePredicatePath, getValueAtPath as getCompiledValue } from "../patch/patch-compiler.js";
 import {
   QueryLoggerService,
   calculateCost,
@@ -98,8 +99,20 @@ GENERALIZED READ-BEFORE-WRITE RULE (MANDATORY):
   * Never invent or assume IDs (e.g., do NOT guess '[id=humus]', '[id=rate_other]', or numeric indices). Always inspect the live store slice first to obtain the authentic ID and current values.
 
 CRITICAL RULES FOR QUESTIONS:
-- Ground your answers strictly on Mtajir documentation or store data.
-- If information is not in the documentation or store data, politely state that you do not have that information rather than guessing.
+- SCOPE & DOMAIN BOUNDARIES:
+  You are Khadoom AI, specialized solely in Mtajir e-commerce store operations and platform features.
+  For questions outside Mtajir store management (such as general software engineering, AI model architecture, external RAG setup/maintenance, personal advice, or unrelated third-party systems):
+  * Do NOT attempt to invent answers, and NEVER force-fit unrelated Mtajir documentation (such as Tabby installments, Shipping, or Store Versioning) into an answer.
+  * Politely inform the merchant that this topic is outside Mtajir store management and documentation scope.
+- MANDATORY RETRIEVAL-BEFORE-ANSWER RULE:
+  You have zero internal knowledge about Mtajir in your pre-trained weights.
+  Whenever the merchant asks ANY question about Mtajir (including platform features, shipping carriers, partner integrations, discounts, promo codes, fees, payment gateways, policies, rules, or system configuration), you MUST call 'search_documentation' BEFORE formulating an answer.
+  Never answer from assumption or state you lack information without searching first.
+- RELEVANCE & GROUNDING:
+  * Carefully evaluate whether the retrieved documentation actually answers the user's specific inquiry.
+  * If the retrieved documentation does not answer the question or is not relevant to what the user asked, state clearly that the requested information is not available in Mtajir documentation.
+  * When relevant documentation is found, ground your answers strictly on the returned text. Include all specific details, codes, partner names, and step-by-step instructions found in the retrieved documentation.
+- General conversational messages (e.g. "hello", "hi", "who are you", "thank you") do NOT require tool calls and can be answered directly.
 
 COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
 - When the merchant asks a question AND requests a store change in the same prompt (e.g., "What is my primary color, change price of humus up by 5"):
@@ -165,7 +178,8 @@ ROLLBACK & VERSION REVERSIONS:
         type: "function" as const,
         function: {
           name: "search_documentation",
-          description: "Search Mtajir platform documentation and feature guides",
+          description:
+            "Search Mtajir platform documentation, shipping carriers, partner integrations, discounts, promo codes, feature guides, policies, payment gateways, and FAQs. MANDATORY: Call this tool for ANY question about what Mtajir offers, supports, or integrates with before attempting to answer.",
           parameters: {
             type: "object",
             properties: {
@@ -273,14 +287,23 @@ ROLLBACK & VERSION REVERSIONS:
       );
     }
 
-    // 1. Semantic Cache check for Q&A
-    const cached = this.docsService.getCachedAnswer(userPrompt);
-    if (cached) {
+    const storeConstraints = {
+      currency: store.currency,
+      locale: store.locale,
+      country: store.shippingZones?.[0]?.countries?.[0],
+    };
+
+    // 1. Context-Scoped Semantic Cache check for Q&A
+    const cachedEntry = await this.docsService.getCachedEntry(userPrompt, storeConstraints);
+    if (cachedEntry) {
       return await finalize(
         {
           type: "answer",
-          message: cached,
-          citations: ["Semantic Cache (Mtajir Docs)"],
+          message: cachedEntry.answer,
+          citations:
+            cachedEntry.citations.length > 0
+              ? cachedEntry.citations
+              : ["Semantic Cache (Mtajir Docs)"],
         },
         "doc_question"
       );
@@ -384,8 +407,14 @@ ROLLBACK & VERSION REVERSIONS:
             );
           }
 
+          const isNegativeOrOutOfScope =
+            /outside (?:the )?scope|not (?:available|covered|found) in Mtajir|no (?:matching )?documentation/i.test(
+              message.content || ""
+            );
+          const effectiveCitations = isNegativeOrOutOfScope ? [] : citations;
+
           const finalIntent: QueryIntentType =
-            citations.length > 0
+            effectiveCitations.length > 0
               ? "doc_question"
               : executedTools.includes("inspect_store_data")
               ? "store_inspection"
@@ -393,15 +422,20 @@ ROLLBACK & VERSION REVERSIONS:
               ? "navigation"
               : "conversation";
 
-          if (citations.length > 0 && message.content) {
-            this.docsService.setCachedAnswer(userPrompt, message.content);
+          if (effectiveCitations.length > 0 && message.content && !activeStagedMutation) {
+            await this.docsService.setCachedAnswer(
+              userPrompt,
+              message.content,
+              effectiveCitations,
+              storeConstraints
+            );
           }
 
           return await finalize(
             {
               type: "answer",
               message: message.content || "Done.",
-              citations: citations.length > 0 ? citations : undefined,
+              citations: effectiveCitations.length > 0 ? effectiveCitations : undefined,
             },
             finalIntent,
             executedTools
@@ -440,11 +474,16 @@ ROLLBACK & VERSION REVERSIONS:
               }),
             });
           } else if (fnName === "search_documentation") {
-            const results = this.docsService.searchDocs(args.query);
+            const results = await this.docsService.searchDocsAsync(args.query, {
+              ...storeConstraints,
+              limit: 5,
+            });
             results.forEach((r) => {
               if (!citations.includes(r.title)) citations.push(r.title);
             });
-            const docContext = results.map((r) => `[${r.title}]: ${r.content}`).join("\n\n");
+            const docContext = results
+              .map((r) => `[${r.title} — ${r.sectionHeader}]: ${r.content}`)
+              .join("\n\n");
 
             messages.push({
               role: "tool",
@@ -636,14 +675,19 @@ Please output a corrected RFC 6902 patch that satisfies the schema constraints a
   }
 
   private getValueAtPath(obj: any, path: string): any {
-    const normalizedPath = path.replace(/^\/store(?=\/|$)/i, "");
-    const parts = normalizedPath.split("/").filter(Boolean);
-    if (parts.length === 0) return obj;
-    let curr = obj;
-    for (const part of parts) {
-      if (curr === undefined || curr === null) return undefined;
-      curr = curr[part];
+    try {
+      const compiled = compilePredicatePath(obj, path);
+      return getCompiledValue(obj, compiled);
+    } catch {
+      const normalizedPath = path.replace(/^\/store(?=\/|$)/i, "");
+      const parts = normalizedPath.split("/").filter(Boolean);
+      if (parts.length === 0) return obj;
+      let curr = obj;
+      for (const part of parts) {
+        if (curr === undefined || curr === null) return undefined;
+        curr = curr[part];
+      }
+      return curr;
     }
-    return curr;
   }
 }

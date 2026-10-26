@@ -1,5 +1,27 @@
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+export function resolveDefaultStoresDir(): string {
+  const cwdCandidate = path.join(process.cwd(), "data", "stores");
+  if (fsSync.existsSync(cwdCandidate)) {
+    return cwdCandidate;
+  }
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const pkgRootCandidate = path.resolve(__dirname, "..", "..", "data", "stores");
+  if (fsSync.existsSync(pkgRootCandidate)) {
+    return pkgRootCandidate;
+  }
+  const harnessCandidate = path.join(process.cwd(), "khadoom-agent-harness", "data", "stores");
+  if (fsSync.existsSync(harnessCandidate)) {
+    return harnessCandidate;
+  }
+  if (fsSync.existsSync(path.resolve(__dirname, "..", "..", "data"))) {
+    return pkgRootCandidate;
+  }
+  return cwdCandidate;
+}
 import { MtajirStore, MtajirStoreSchema } from "../schema/store.schema.js";
 import { JsonPatchOperation } from "../schema/patch.schema.js";
 
@@ -13,7 +35,7 @@ export interface VersionChangelogEntry {
 export class StoreRepository {
   private baseDir: string;
 
-  constructor(baseDir = path.join(process.cwd(), "data", "stores")) {
+  constructor(baseDir = resolveDefaultStoresDir()) {
     this.baseDir = baseDir;
   }
 

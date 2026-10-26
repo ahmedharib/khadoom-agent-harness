@@ -6,7 +6,9 @@ import { SEED_STORE } from "../src/data/seed-store.js";
 import { StoreRepository } from "../src/storage/store.repository.js";
 import { StagingService } from "../src/staging/staging.service.js";
 import { generateSemanticDiff } from "../src/diff/semantic-diff.js";
-import { DocsService } from "../src/rag/docs.service.js";
+import { DocsService, FileEmbeddingsStore } from "../src/rag/docs.service.js";
+import { loadDocumentationCorpus } from "../src/rag/doc-loader.js";
+import { BM25SearchEngine, normalizeAndTokenize } from "../src/rag/bm25-search.js";
 import { JsonPatchOperation } from "../src/schema/patch.schema.js";
 import {
   QueryLoggerService,
@@ -24,7 +26,19 @@ async function runTests() {
 
   const repository = new StoreRepository(testDir);
   const stagingService = new StagingService(repository);
-  const docsService = new DocsService();
+  const testEmbedder = async (text: string) => {
+    const tokens = text.toLowerCase().split(/\s+/).filter(Boolean);
+    const vec = new Array(32).fill(0);
+    for (let i = 0; i < tokens.length; i++) {
+      for (let j = 0; j < tokens[i].length; j++) {
+        vec[(tokens[i].charCodeAt(j) * 31 + j) % 32] += 1;
+      }
+    }
+    const norm = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0)) || 1;
+    return vec.map((v) => Number((v / norm).toFixed(6)));
+  };
+
+  const docsService = new DocsService({ embedder: testEmbedder });
 
   // Test 1: Zod Schema Validation on Seed Store
   console.log("Test 1: Validating Seed Store with Zod...");
@@ -119,12 +133,12 @@ async function runTests() {
 
   // Test 9: Mtajir Documentation RAG & Semantic Cache
   console.log("\nTest 9: Verifying Documentation Search & Caching...");
-  const searchResults = docsService.searchDocs("shipping");
+  const searchResults = await docsService.searchDocs("shipping");
   assert.ok(searchResults.length > 0);
   assert.equal(searchResults[0].id, "doc_shipping_zones");
 
-  docsService.setCachedAnswer("how do shipping zones work", "Shipping is configured via geographic zones.");
-  const cachedAnswer = docsService.getCachedAnswer("how do shipping zones work");
+  await docsService.setCachedAnswer("how do shipping zones work", "Shipping is configured via geographic zones.");
+  const cachedAnswer = await docsService.getCachedAnswer("how do shipping zones work");
   assert.equal(cachedAnswer, "Shipping is configured via geographic zones.");
   console.log("  Passed: Documentation search and semantic caching operational.");
 
@@ -397,7 +411,122 @@ async function runTests() {
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 20 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  // Test 21: Markdown Corpus Loader, YAML Frontmatter & Section Chunking
+  console.log("\nTest 21: Testing Markdown Corpus Loader & Section Chunker...");
+  const corpus = await loadDocumentationCorpus();
+  assert.ok(corpus.chunks.length >= 10, "Should split markdown articles into multiple chunks");
+  assert.ok(corpus.corpusHash.length === 32, "Should compute 32-char MD5 corpus hash");
+  const tabbyChunk = corpus.chunks.find((c) => c.docId === "doc_payment_tabby");
+  assert.ok(tabbyChunk, "Should load doc_payment_tabby from data/docs");
+  assert.deepEqual(tabbyChunk?.metadata.supportedCurrencies, ["SAR", "AED"]);
+  assert.deepEqual(tabbyChunk?.metadata.supportedCountries, ["SA", "AE"]);
+  console.log(
+    `  Passed: Loaded ${corpus.chunks.length} chunks across Markdown corpus (hash: ${corpus.corpusHash.slice(0, 8)}...).`
+  );
+
+  // Test 22: Bilingual BM25 Normalization & Arabic Clitic/Prefix Stemming
+  console.log("\nTest 22: Testing Arabic & English Normalization in BM25...");
+  const arabicTokens = normalizeAndTokenize("كيف أفعل الدفع بالتقسيط لتابي في المتجر؟");
+  assert.ok(
+    arabicTokens.includes("تقسيط"),
+    "Arabic prefix 'بال' should be stripped to match root 'تقسيط'"
+  );
+  assert.ok(
+    arabicTokens.includes("تابي"),
+    "Arabic prefix 'ل' should be stripped to match root 'تابي'"
+  );
+
+  const bm25 = new BM25SearchEngine(corpus.chunks);
+  const arabicSearch = bm25.search("كيف أفعل بالتقسيط لتابي؟");
+  assert.ok(arabicSearch.length > 0);
+  assert.equal(arabicSearch[0].chunk.docId, "doc_payment_tabby");
+  console.log("  Passed: Arabic clitic prefixes ('بالتقسيط', 'لتابي') normalized and matched doc_payment_tabby.");
+
+  // Test 23: EmbeddingsStore Repository Adapter & MD5 Hash Persistence
+  console.log("\nTest 23: Testing FileEmbeddingsStore Persistence & MD5 Deduplication...");
+  const testEmbeddingsPath = path.join(testDir, "embeddings", "doc-embeddings.json");
+  const fileEmbeddingsStore = new FileEmbeddingsStore(testEmbeddingsPath);
+  const ragService = new DocsService({ embeddingsStore: fileEmbeddingsStore, embedder: testEmbedder });
+  await ragService.syncCorpusAndEmbeddings();
+
+  const persistedMap = await fileEmbeddingsStore.loadEmbeddings();
+  assert.equal(persistedMap.size, corpus.chunks.length);
+  const persistedCorpusHash = await fileEmbeddingsStore.getCorpusHash();
+  assert.equal(persistedCorpusHash, corpus.corpusHash);
+  console.log(`  Passed: ${persistedMap.size} chunk embeddings persisted with MD5 hashes via EmbeddingsStore.`);
+
+  // Test 24: Hybrid RRF Search & Store Constraint Hard Filtering (SAR vs KWD)
+  console.log("\nTest 24: Testing Hybrid RRF Search & Currency/Country Constraint Filtering...");
+  // Querying KNet from a Saudi (SAR / SA) store must prune KWD-exclusive KNet docs
+  const sarKnetResults = await ragService.searchDocsAsync("KNet payment gateway Kuwait", {
+    currency: "SAR",
+    country: "SA",
+  });
+  const hasKnetInSar = sarKnetResults.some((r) => r.docId === "doc_payment_knet");
+  assert.equal(hasKnetInSar, false, "KWD-only KNet doc must be pruned for SAR/SA stores");
+
+  // Querying KNet from a Kuwaiti (KWD / KW) store must return doc_payment_knet at Rank 1
+  const kwdKnetResults = await ragService.searchDocsAsync("KNet payment gateway Kuwait", {
+    currency: "KWD",
+    country: "KW",
+  });
+  assert.ok(kwdKnetResults.length > 0);
+  assert.equal(kwdKnetResults[0].docId, "doc_payment_knet");
+  assert.ok(kwdKnetResults[0].rrfScore > 0);
+  console.log("  Passed: Hybrid RRF ranked KNet #1 for KWD stores and hard-filtered it out for SAR stores.");
+
+  // Test 25: Context-Scoped Semantic Cache & Corpus Hash Invalidation
+  console.log("\nTest 25: Testing Context-Scoped Semantic Cache & Corpus Invalidation...");
+  await ragService.setCachedAnswer(
+    "how do i enable tabby installments in my store",
+    "Tabby is available for SAR and AED stores with a valid CR.",
+    ["Configuring Tabby (Buy Now, Pay Later)"],
+    { currency: "SAR", country: "SA", locale: "ar" }
+  );
+
+  // Paraphrased / close query in same SAR/SA scope should hit semantic cache (>= 0.94 cosine sim)
+  const sarCacheHit = await ragService.getCachedEntry(
+    "enable tabby installments in my store",
+    { currency: "SAR", country: "SA", locale: "ar" }
+  );
+  assert.ok(sarCacheHit, "Should hit semantic cache for matching SAR/SA store context");
+  assert.equal(
+    sarCacheHit?.answer,
+    "Tabby is available for SAR and AED stores with a valid CR."
+  );
+  assert.ok((sarCacheHit?.similarity ?? 0) >= 0.94);
+
+  // Same query from a KWD/KW store must NOT hit the SAR cached answer (prevents cache pollution)
+  const kwdCacheMiss = await ragService.getCachedEntry(
+    "how do i enable tabby installments in my store",
+    { currency: "KWD", country: "KW", locale: "ar" }
+  );
+  assert.equal(
+    kwdCacheMiss,
+    undefined,
+    "Semantic cache must isolate entries across different store currency/country constraints"
+  );
+
+  // Updating corpus hash must automatically invalidate stale cache entries
+  ragService.updateCorpusHash("new_corpus_hash_after_doc_update_v2");
+  const postInvalidationMiss = await ragService.getCachedEntry(
+    "how do i enable tabby installments in my store",
+    { currency: "SAR", country: "SA", locale: "ar" }
+  );
+  assert.equal(
+    postInvalidationMiss,
+    undefined,
+    "Stale cache entries must be invalidated when corpusHash changes"
+  );
+  console.log(
+    "  Passed: Semantic cache verified paraphrase hit (>=0.94), cross-currency isolation, and corpus-hash invalidation."
+  );
+
+  // Clean up test directory again
+  await fs.rm(testDir, { recursive: true, force: true });
+
+  console.log("\n==================================================");
+  console.log(" ALL 25 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 
