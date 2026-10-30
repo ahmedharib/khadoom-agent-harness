@@ -91,6 +91,9 @@ CRITICAL RULES FOR STORE MUTATIONS:
 - Store name is "${store.name}", description is "${store.description || "No description set"}".
 - Store currency is ${store.currency}, locale is ${store.locale}, current store version is v${store.version}.
 - Always provide a clear, concise merchant-facing explanation of what you are changing and why.
+- RESPONSE FORMATTING:
+  * Structure responses cleanly with concise paragraphs and bullet points for lists.
+  * Use bold markdown (**term**) intentionally for key terms, carrier names, or headers. Avoid wrapping punctuation, symbols, or entire sentences in asterisks.
 
 GENERALIZED READ-BEFORE-WRITE RULE (MANDATORY):
 - Never guess entity IDs, keys, or current store configuration!

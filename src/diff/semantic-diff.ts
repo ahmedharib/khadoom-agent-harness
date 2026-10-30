@@ -125,13 +125,27 @@ export function generateSemanticDiff(
     // 2. Catalog / Products
     if (path.startsWith("/products")) {
       const parts = path.split("/").filter(Boolean);
-      if (parts.length === 1 && op === "add") {
+      if (
+        (parts.length === 1 ||
+          (parts.length === 2 && (parts[1] === "-" || /^\d+$/.test(parts[1])))) &&
+        op === "add"
+      ) {
         items.push({
           category: "catalog",
           path,
           operation: op,
-          summary: `Added new product '${value?.title || "Item"}' (Price: ${value?.price || 0})`,
+          summary: `Added new product '${value?.title || "Item"}' (Price: ${value?.price ?? 0} ${originalStore.currency})`,
           details: { newValue: value },
+        });
+      } else if (parts.length === 2 && op === "remove") {
+        const prod = originalStore.products[parseInt(parts[1], 10)];
+        const prodTitle = prod ? prod.title : `Product #${parts[1]}`;
+        items.push({
+          category: "catalog",
+          path,
+          operation: op,
+          summary: `Removed product '${prodTitle}'`,
+          details: { oldValue },
         });
       } else if (parts.length >= 3) {
         const prodIndex = parts[1];
@@ -159,13 +173,73 @@ export function generateSemanticDiff(
 
     // 3. Shipping Zones & Rates
     if (path.startsWith("/shippingZones")) {
-      items.push({
-        category: "shipping",
-        path,
-        operation: op,
-        summary: `Adjusted shipping configuration at ${path} to ${JSON.stringify(value)}`,
-        details: { oldValue, newValue: value },
-      });
+      const parts = path.split("/").filter(Boolean);
+      if (parts.length <= 2 && op === "add") {
+        items.push({
+          category: "shipping",
+          path,
+          operation: op,
+          summary: `Added shipping zone '${value?.name || "New Zone"}' (${(value?.countries || []).join(", ")})`,
+          details: { newValue: value },
+        });
+      } else if (parts.length === 2 && op === "remove") {
+        const zone = originalStore.shippingZones[parseInt(parts[1], 10)];
+        items.push({
+          category: "shipping",
+          path,
+          operation: op,
+          summary: `Removed shipping zone '${zone?.name || parts[1]}'`,
+          details: { oldValue },
+        });
+      } else if (parts[2] === "rates" && parts.length <= 4 && op === "add") {
+        const zone = originalStore.shippingZones[parseInt(parts[1], 10)];
+        items.push({
+          category: "shipping",
+          path,
+          operation: op,
+          summary: `Added shipping rate '${value?.name || "Rate"}' (${value?.price ?? 0} ${originalStore.currency}) to '${zone?.name || "Zone"}'`,
+          details: { newValue: value },
+        });
+      } else if (parts[2] === "rates" && parts.length === 4 && op === "remove") {
+        const zone = originalStore.shippingZones[parseInt(parts[1], 10)];
+        const rate = zone?.rates?.[parseInt(parts[3], 10)];
+        items.push({
+          category: "shipping",
+          path,
+          operation: op,
+          summary: `Removed shipping rate '${rate?.name || parts[3]}' from '${zone?.name || "Zone"}'`,
+          details: { oldValue },
+        });
+      } else if (parts[2] === "rates" && parts.length >= 5) {
+        const zone = originalStore.shippingZones[parseInt(parts[1], 10)];
+        const rate = zone?.rates?.[parseInt(parts[3], 10)];
+        const field = parts.slice(4).join(".");
+        items.push({
+          category: "shipping",
+          path,
+          operation: op,
+          summary: `Updated ${field} for rate '${rate?.name || parts[3]}' in '${zone?.name || "Zone"}'`,
+          details: { oldValue, newValue: value },
+        });
+      } else if (parts.length >= 3) {
+        const zone = originalStore.shippingZones[parseInt(parts[1], 10)];
+        const field = parts.slice(2).join(".");
+        items.push({
+          category: "shipping",
+          path,
+          operation: op,
+          summary: `Updated ${field} for shipping zone '${zone?.name || parts[1]}'`,
+          details: { oldValue, newValue: value },
+        });
+      } else {
+        items.push({
+          category: "shipping",
+          path,
+          operation: op,
+          summary: `Adjusted shipping configuration at ${path}`,
+          details: { oldValue, newValue: value },
+        });
+      }
       continue;
     }
 

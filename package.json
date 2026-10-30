@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "tsx watch src/cli.ts",
     "start": "tsx src/cli.ts",
+    "server": "tsx src/server.ts",
+    "ui:dev": "npm --prefix ui run dev",
+    "ui:build": "npm --prefix ui run build",
     "test": "tsx test/index.test.ts",
     "embed": "tsx src/rag/sync-embeddings.ts",
     "build": "tsc"
