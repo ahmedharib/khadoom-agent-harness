@@ -91,11 +91,30 @@ export interface UsageSummary {
   questionsCount: number;
 }
 
+export interface CostCalculationOptions {
+  latencyMs?: number;
+  hourlyCostUsd?: number;
+}
+
 /**
- * Calculates exact USD cost based on token counts and model pricing
+ * Calculates USD cost based on token counts and known model pricing,
+ * optional per-token env overrides, or amortized GPU runtime hourly pricing
+ * (e.g. LLM_HOURLY_COST_USD=0.25 for an L4 instance).
  */
-export function calculateCost(model: string, usage: TokenUsage): CostBreakdown {
-  const pricing = MODEL_PRICING[model] || MODEL_PRICING["gpt-4o-mini"];
+export function calculateCost(
+  model: string,
+  usage: TokenUsage,
+  options?: CostCalculationOptions
+): CostBreakdown {
+  const known = MODEL_PRICING[model];
+  const envIn = process.env.LLM_INPUT_COST_PER_M ? Number(process.env.LLM_INPUT_COST_PER_M) : undefined;
+  const envOut = process.env.LLM_OUTPUT_COST_PER_M ? Number(process.env.LLM_OUTPUT_COST_PER_M) : undefined;
+
+  const pricing: ModelPricingTier = known ?? {
+    inputPerMillion: Number.isFinite(envIn) ? envIn! : 0,
+    cachedInputPerMillion: Number.isFinite(envIn) ? envIn! : 0,
+    outputPerMillion: Number.isFinite(envOut) ? envOut! : 0,
+  };
 
   const cachedTokens = Math.min(usage.cachedTokens, usage.promptTokens);
   const uncachedPromptTokens = Math.max(0, usage.promptTokens - cachedTokens);
@@ -103,12 +122,23 @@ export function calculateCost(model: string, usage: TokenUsage): CostBreakdown {
   const uncachedInputCostUsd = (uncachedPromptTokens / 1_000_000) * pricing.inputPerMillion;
   const cachedInputCostUsd = (cachedTokens / 1_000_000) * pricing.cachedInputPerMillion;
   const outputCostUsd = (usage.completionTokens / 1_000_000) * pricing.outputPerMillion;
-  const totalCostUsd = uncachedInputCostUsd + cachedInputCostUsd + outputCostUsd;
+
+  let runtimeCostUsd = 0;
+  if (!known && pricing.inputPerMillion === 0 && pricing.outputPerMillion === 0) {
+    const envHourly = process.env.LLM_HOURLY_COST_USD ? Number(process.env.LLM_HOURLY_COST_USD) : undefined;
+    const hourlyRate =
+      options?.hourlyCostUsd ?? (Number.isFinite(envHourly) ? envHourly! : 0);
+    if (hourlyRate > 0 && options?.latencyMs && options.latencyMs > 0) {
+      runtimeCostUsd = (options.latencyMs / 3_600_000) * hourlyRate;
+    }
+  }
+
+  const totalCostUsd = uncachedInputCostUsd + cachedInputCostUsd + outputCostUsd + runtimeCostUsd;
 
   return {
     uncachedInputCostUsd: Number(uncachedInputCostUsd.toFixed(8)),
     cachedInputCostUsd: Number(cachedInputCostUsd.toFixed(8)),
-    outputCostUsd: Number(outputCostUsd.toFixed(8)),
+    outputCostUsd: Number((outputCostUsd + runtimeCostUsd).toFixed(8)),
     totalCostUsd: Number(totalCostUsd.toFixed(8)),
   };
 }

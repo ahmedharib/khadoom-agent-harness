@@ -1071,11 +1071,134 @@ async function runTests() {
   assert.equal(conflictCallCount, 0, "CONCURRENCY_CONFLICT must not trigger LLM retry calls");
   console.log("  Passed: Self-correction preserved inspected context, merged sequential mutations, and aborted conflict retries.");
 
+  // Test 35 (Harness Gap): Safe Malformed Tool-Call JSON Parsing & Recovery
+  console.log("\nTest 35 (Gap): Testing Safe Tool-Call JSON Parsing & Self-Recovery...");
+  const gapAgent = new KhadoomAgent(h5Repo, h5Staging, countingEmptyService, c3Logger, "test-key");
+  let gapStep = 0;
+  (gapAgent as any).openai = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          gapStep++;
+          if (gapStep === 1) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "gap_bad_json",
+                        type: "function",
+                        function: {
+                          name: "propose_store_changes",
+                          arguments: "{explanation: 'unquoted bad json",
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          }
+          if (gapStep === 2) {
+            // Confirm invalid-JSON tool error was fed back to the model
+            const lastMsg = params.messages[params.messages.length - 1];
+            assert.equal(lastMsg.role, "tool");
+            assert.ok(String(lastMsg.content).includes("Invalid JSON arguments"));
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "gap_fenced_json",
+                        type: "function",
+                        function: {
+                          name: "propose_store_changes",
+                          arguments:
+                            "```json\n{\"explanation\":\"Recovered patch\",\"patches\":[{\"op\":\"replace\",\"path\":\"/theme/colors/primary\",\"value\":\"#8B5CF6\"}]}\n```",
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          }
+          return {
+            choices: [{ message: { role: "assistant", content: "Theme color staged." } }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          };
+        },
+      },
+    },
+  };
+
+  const gapRes = await gapAgent.processUserPrompt(validStore.id, "Change primary color to #8B5CF6");
+  assert.equal(gapRes.type, "mutation_staged");
+  assert.equal(gapRes.stagingSession?.stagedStore.theme.colors.primary, "#8B5CF6");
+  console.log("  Passed: Malformed JSON recovered cleanly via tool error feedback and fenced JSON stripped.");
+
+  // Test 36 (Local/Colab LLM Switching & Cost Amortization)
+  console.log("\nTest 36 (Local LLM): Testing OpenAI-Compatible Endpoint Config & Think Stripping...");
+  const localAgent = new KhadoomAgent(h5Repo, h5Staging, countingEmptyService, c3Logger, undefined, undefined, {
+    baseURL: "http://127.0.0.1:8000/v1",
+    apiKey: "not-needed",
+    model: "Qwen/Qwen3-8B",
+  });
+  const modelCfg = localAgent.getModelConfig();
+  assert.equal(modelCfg.model, "Qwen/Qwen3-8B");
+  assert.equal(modelCfg.baseURL, "http://127.0.0.1:8000/v1");
+  assert.equal(modelCfg.isCustomEndpoint, true);
+  assert.equal(modelCfg.disableThinking, true);
+
+  let seenChatTemplateKwargs: any;
+  (localAgent as any).openai = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          seenChatTemplateKwargs = params.chat_template_kwargs;
+          return {
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: "<think>internal reasoning that must stay hidden</think>\nMtajir supports Aramex and SMSA.",
+                },
+              },
+            ],
+            usage: { prompt_tokens: 2000, completion_tokens: 50, total_tokens: 2050 },
+          };
+        },
+      },
+    },
+  };
+
+  const qwenRes = await localAgent.processUserPrompt(validStore.id, "hello");
+  assert.equal(qwenRes.type, "answer");
+  assert.deepEqual(seenChatTemplateKwargs, { enable_thinking: false });
+  assert.equal(qwenRes.message, "Mtajir supports Aramex and SMSA.");
+
+  const l4Cost = calculateCost(
+    "Qwen/Qwen3-8B",
+    { promptTokens: 3000, completionTokens: 80, totalTokens: 3080, cachedTokens: 0 },
+    { latencyMs: 1800, hourlyCostUsd: 0.25 }
+  );
+  // (1800 / 3,600,000) * 0.25 = 0.000125 USD
+  assert.equal(l4Cost.totalCostUsd, 0.000125);
+  console.log("  Passed: Open-weight endpoint config, think stripping, and L4 hourly cost calculation verified.");
+
   // Clean up test directory again
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 34 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  console.log(" ALL 36 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 

@@ -90,7 +90,7 @@ const server = http.createServer(async (req, res) => {
       }
       const changelog = await repository.getChangelog(storeId);
       const telemetry = await queryLogger.getSummary(storeId);
-      return sendJson(res, 200, { store, changelog, telemetry });
+      return sendJson(res, 200, { store, changelog, telemetry, modelConfig: agent.getModelConfig() });
     }
 
     // 2. POST /api/chat - Send merchant prompt to Khadoom
@@ -267,10 +267,12 @@ async function start() {
   }
 
   agent = new KhadoomAgent(repository, stagingService, docsService, queryLogger);
+  const llmInfo = agent.getModelConfig();
 
   server.listen(PORT, HOST, () => {
     console.log(`\n==================================================`);
     console.log(`  KHADOOM API SERVER READY: http://${HOST}:${PORT}`);
+    console.log(`  LLM: ${llmInfo.model}${llmInfo.baseURL ? ` @ ${llmInfo.baseURL}` : " (OpenAI)"}`);
     console.log(`  Store: ${store.name} (v${store.version})`);
     console.log(`==================================================\n`);
   });

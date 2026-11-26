@@ -39,7 +39,14 @@ async function main() {
     store = await repository.saveInitialStore(SEED_STORE);
   }
 
-  console.log(`\nActive Store: ${store.name} (ID: ${store.id}) | Version: v${store.version}`);
+  const hasLlmKey = Boolean(process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || process.env.LLM_BASE_URL);
+  if (!hasLlmKey) {
+    console.warn("\n[Warning] Neither OPENAI_API_KEY nor LLM_BASE_URL is defined in your environment or .env file.");
+    console.warn("Please configure OPENAI_API_KEY or set LLM_BASE_URL + LLM_MODEL in .env.\n");
+  }
+
+  console.log(`\nLLM Backend: ${agent.getModelConfig().model}${agent.getModelConfig().baseURL ? ` @ ${agent.getModelConfig().baseURL}` : " (OpenAI)"}`);
+  console.log(`Active Store: ${store.name} (ID: ${store.id}) | Version: v${store.version}`);
   console.log(`Primary Color: ${store.theme.colors.primary} | Banner: ${store.theme.banner.enabled ? "Active" : "Disabled"}`);
   console.log(`Products: ${store.products.length} | Payment Gateways: ${store.paymentProviders.filter(p => p.enabled).map(p => p.name).join(", ")}`);
   console.log("\nCommands available:");

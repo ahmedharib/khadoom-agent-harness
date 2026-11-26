@@ -195,6 +195,7 @@ export interface VectorScoredChunk {
 export interface EmbeddingsServiceOptions {
   store?: EmbeddingsStore;
   apiKey?: string;
+  baseURL?: string;
   model?: string;
   embedder?: (text: string) => Promise<number[]>;
 }
@@ -218,11 +219,21 @@ export class EmbeddingsService {
 
   constructor(options: EmbeddingsServiceOptions = {}) {
     this.store = options.store || new FileEmbeddingsStore();
-    this.model = options.model || "text-embedding-3-small";
+    this.model = options.model || process.env.EMBEDDING_MODEL || "text-embedding-3-small";
     this.customEmbedder = options.embedder;
 
-    const apiKey = options.apiKey || process.env.OPENAI_API_KEY || "dummy_key_for_mock";
-    this.openai = new OpenAI({ apiKey });
+    const baseURL =
+      options.baseURL ?? (process.env.EMBEDDING_BASE_URL || undefined);
+    const apiKey =
+      options.apiKey ||
+      process.env.EMBEDDING_API_KEY ||
+      process.env.OPENAI_API_KEY ||
+      "dummy_key_for_mock";
+    this.openai = new OpenAI({
+      apiKey,
+      ...(baseURL ? { baseURL } : {}),
+      timeout: 60_000,
+    });
   }
 
   async embedText(text: string): Promise<number[]> {
