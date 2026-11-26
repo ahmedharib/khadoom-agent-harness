@@ -1,11 +1,12 @@
 import React from "react";
-import { MtajirStore, TelemetrySummary } from "../types.js";
+import { MtajirStore, TelemetrySummary, ModelConfigInfo } from "../types.js";
 import { RotateCcw, Activity, ArrowLeft } from "lucide-react";
 import { KhadoomIcon } from "./KhadoomIcon.js";
 
 interface HeaderProps {
   store: MtajirStore | null;
   telemetry: TelemetrySummary | null;
+  modelConfig: ModelConfigInfo | null;
   onReset: () => void;
   onRollback: () => void;
   isLoading: boolean;
@@ -14,6 +15,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   store,
   telemetry,
+  modelConfig,
   onReset,
   onRollback,
   isLoading,
@@ -153,14 +155,18 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         )}
 
-        {/* 3. Telemetry Token & Cost Pill (Unified pill) */}
+        {/* 3. Telemetry Token, Speed, Model & Cost Pill (Unified pill) */}
         {telemetry && (
           <div
-            title={`Total Queries: ${telemetry.totalQueries} | Prompt & Completion Tokens`}
+            title={`Backend: ${modelConfig ? `${modelConfig.model} (${modelConfig.isCustomEndpoint ? `Custom Endpoint: ${modelConfig.baseURL}` : "OpenAI API"})` : "Unknown"} | Queries: ${telemetry.totalQueries} | Avg: ${telemetry.averageLatencyMs}ms | P95: ${telemetry.p95LatencyMs ?? telemetry.averageLatencyMs}ms | Speed: ${telemetry.avgTokensPerSecond ?? 0} tok/s | Retries: ${telemetry.totalRetries ?? 0}`}
             style={infoPillStyle}
           >
             <Activity size={13} color="var(--accent-lavender)" />
-            <span>${telemetry.totalCostUsd.toFixed(4)} USD</span>
+            <span>
+              {modelConfig ? `${modelConfig.model.split("/").pop()} • ` : ""}
+              ${telemetry.totalCostUsd.toFixed(4)} USD
+              {telemetry.avgTokensPerSecond ? ` • ${telemetry.avgTokensPerSecond} tok/s` : ""}
+            </span>
           </div>
         )}
 

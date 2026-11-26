@@ -47,6 +47,7 @@ export interface TokenUsage {
   completionTokens: number;
   totalTokens: number;
   cachedTokens: number;
+  reasoningTokens?: number;
 }
 
 export interface CostBreakdown {
@@ -64,20 +65,50 @@ export type QueryIntentType =
   | "conversation"
   | "error";
 
+export type ProviderMode = "openai_api" | "custom_endpoint";
+
 export interface QueryLogEntry {
   id: string;
   timestamp: string;
   storeId: string;
   userPrompt: string;
   model: string;
+  providerType?: ProviderMode;
   latencyMs: number;
+  llmLatencyMs?: number;
+  llmCallsCount?: number;
+  tokensPerSecond?: number;
+  msPerOutputToken?: number;
   intentType: QueryIntentType;
   toolCalls: string[];
   retriesCount: number;
+  jsonParseErrorsCount?: number;
+  semanticCacheHit?: boolean;
   usage: TokenUsage;
   cost: CostBreakdown;
   status: "success" | "error";
   errorMessage?: string;
+}
+
+export interface ModelBenchmarkSummary {
+  queries: number;
+  providerType: ProviderMode | "mixed";
+  avgPromptTokens: number;
+  avgCompletionTokens: number;
+  cacheHitRatePct: number;
+  totalCostUsd: number;
+  avgCostPerQueryUsd: number;
+  avgLatencyMs: number;
+  p50LatencyMs: number;
+  p95LatencyMs: number;
+  avgLlmLatencyMs: number;
+  avgTokensPerSecond: number;
+  avgMsPerOutputToken: number;
+  avgLlmCallsPerQuery: number;
+  retryRatePct: number;
+  jsonParseErrorCount: number;
+  errorRatePct: number;
+  semanticCacheHits: number;
 }
 
 export interface UsageSummary {
@@ -87,8 +118,19 @@ export interface UsageSummary {
   totalCachedTokens: number;
   totalCostUsd: number;
   averageLatencyMs: number;
+  p50LatencyMs: number;
+  p95LatencyMs: number;
+  avgLlmLatencyMs: number;
+  avgTokensPerSecond: number;
+  avgMsPerOutputToken: number;
+  avgLlmCallsPerQuery: number;
+  totalRetries: number;
+  totalJsonParseErrors: number;
+  semanticCacheHits: number;
+  cacheHitRatePct: number;
   mutationsCount: number;
   questionsCount: number;
+  byModel: Record<string, ModelBenchmarkSummary>;
 }
 
 export interface CostCalculationOptions {
@@ -143,6 +185,96 @@ export function calculateCost(
   };
 }
 
+function percentile(sortedAsc: number[], p: number): number {
+  if (sortedAsc.length === 0) return 0;
+  const idx = Math.min(sortedAsc.length - 1, Math.floor(sortedAsc.length * p));
+  return sortedAsc[idx];
+}
+
+function summarizeGroup(entries: QueryLogEntry[]): ModelBenchmarkSummary {
+  const n = entries.length;
+  let totalPrompt = 0;
+  let totalCompletion = 0;
+  let totalCached = 0;
+  let totalCost = 0;
+  let totalLatency = 0;
+  let totalLlmLatency = 0;
+  let llmLatencyCount = 0;
+  let totalLlmCalls = 0;
+  let llmCallsPresentCount = 0;
+  let totalRetries = 0;
+  let jsonParseErrorCount = 0;
+  let errorCount = 0;
+  let semanticCacheHits = 0;
+  let liveLlmLatencySum = 0;
+  let liveCompletionSum = 0;
+  const providers = new Set<ProviderMode>();
+  const latencies: number[] = [];
+
+  for (const e of entries) {
+    totalPrompt += e.usage.promptTokens;
+    totalCompletion += e.usage.completionTokens;
+    totalCached += e.usage.cachedTokens;
+    totalCost += e.cost.totalCostUsd;
+    totalLatency += e.latencyMs;
+    latencies.push(e.latencyMs);
+    totalRetries += e.retriesCount ?? 0;
+    jsonParseErrorCount += e.jsonParseErrorsCount ?? 0;
+    if (e.status === "error") errorCount++;
+    if (e.semanticCacheHit) semanticCacheHits++;
+    if (e.providerType) providers.add(e.providerType);
+
+    const effLlmMs = e.llmLatencyMs ?? (e.semanticCacheHit ? 0 : e.latencyMs);
+    if (!e.semanticCacheHit && effLlmMs > 0) {
+      totalLlmLatency += effLlmMs;
+      llmLatencyCount++;
+      liveLlmLatencySum += effLlmMs;
+      liveCompletionSum += e.usage.completionTokens;
+    }
+
+    if (typeof e.llmCallsCount === "number") {
+      totalLlmCalls += e.llmCallsCount;
+      llmCallsPresentCount++;
+    } else if (!e.semanticCacheHit) {
+      totalLlmCalls += 1 + (e.toolCalls?.length ?? 0) + (e.retriesCount ?? 0);
+      llmCallsPresentCount++;
+    }
+  }
+
+  latencies.sort((a, b) => a - b);
+  const avgTokensPerSecond =
+    liveLlmLatencySum > 0 && liveCompletionSum > 0
+      ? Number(((liveCompletionSum * 1000) / liveLlmLatencySum).toFixed(2))
+      : 0;
+  const avgMsPerOutputToken =
+    liveCompletionSum > 0 && liveLlmLatencySum > 0
+      ? Number((liveLlmLatencySum / liveCompletionSum).toFixed(2))
+      : 0;
+
+  return {
+    queries: n,
+    providerType: providers.size === 1 ? [...providers][0] : "mixed",
+    avgPromptTokens: Math.round(totalPrompt / n),
+    avgCompletionTokens: Math.round(totalCompletion / n),
+    cacheHitRatePct:
+      totalPrompt > 0 ? Number(((totalCached / totalPrompt) * 100).toFixed(1)) : 0,
+    totalCostUsd: Number(totalCost.toFixed(6)),
+    avgCostPerQueryUsd: Number((totalCost / n).toFixed(6)),
+    avgLatencyMs: Math.round(totalLatency / n),
+    p50LatencyMs: Math.round(percentile(latencies, 0.5)),
+    p95LatencyMs: Math.round(percentile(latencies, 0.95)),
+    avgLlmLatencyMs: llmLatencyCount > 0 ? Math.round(totalLlmLatency / llmLatencyCount) : 0,
+    avgTokensPerSecond,
+    avgMsPerOutputToken,
+    avgLlmCallsPerQuery:
+      llmCallsPresentCount > 0 ? Number((totalLlmCalls / llmCallsPresentCount).toFixed(2)) : 0,
+    retryRatePct: Number(((totalRetries / n) * 100).toFixed(1)),
+    jsonParseErrorCount,
+    errorRatePct: Number(((errorCount / n) * 100).toFixed(1)),
+    semanticCacheHits,
+  };
+}
+
 export class QueryLoggerService {
   private logFilePath: string;
 
@@ -190,8 +322,19 @@ export class QueryLoggerService {
         totalCachedTokens: 0,
         totalCostUsd: 0,
         averageLatencyMs: 0,
+        p50LatencyMs: 0,
+        p95LatencyMs: 0,
+        avgLlmLatencyMs: 0,
+        avgTokensPerSecond: 0,
+        avgMsPerOutputToken: 0,
+        avgLlmCallsPerQuery: 0,
+        totalRetries: 0,
+        totalJsonParseErrors: 0,
+        semanticCacheHits: 0,
+        cacheHitRatePct: 0,
         mutationsCount: 0,
         questionsCount: 0,
+        byModel: {},
       };
     }
 
@@ -199,19 +342,32 @@ export class QueryLoggerService {
     let totalCompletion = 0;
     let totalCached = 0;
     let totalCost = 0;
-    let totalLatency = 0;
+    let totalRetries = 0;
+    let totalJsonParseErrors = 0;
     let mutationsCount = 0;
     let questionsCount = 0;
 
+    const groupedByModel = new Map<string, QueryLogEntry[]>();
     for (const e of filtered) {
       totalPrompt += e.usage.promptTokens;
       totalCompletion += e.usage.completionTokens;
       totalCached += e.usage.cachedTokens;
       totalCost += e.cost.totalCostUsd;
-      totalLatency += e.latencyMs;
+      totalRetries += e.retriesCount ?? 0;
+      totalJsonParseErrors += e.jsonParseErrorsCount ?? 0;
 
       if (e.intentType === "mutation") mutationsCount++;
       if (e.intentType === "doc_question" || e.intentType === "store_inspection") questionsCount++;
+
+      const bucket = groupedByModel.get(e.model) ?? [];
+      bucket.push(e);
+      groupedByModel.set(e.model, bucket);
+    }
+
+    const overall = summarizeGroup(filtered);
+    const byModel: Record<string, ModelBenchmarkSummary> = {};
+    for (const [modelName, entries] of groupedByModel.entries()) {
+      byModel[modelName] = summarizeGroup(entries);
     }
 
     return {
@@ -220,9 +376,20 @@ export class QueryLoggerService {
       totalCompletionTokens: totalCompletion,
       totalCachedTokens: totalCached,
       totalCostUsd: Number(totalCost.toFixed(6)),
-      averageLatencyMs: Math.round(totalLatency / filtered.length),
+      averageLatencyMs: overall.avgLatencyMs,
+      p50LatencyMs: overall.p50LatencyMs,
+      p95LatencyMs: overall.p95LatencyMs,
+      avgLlmLatencyMs: overall.avgLlmLatencyMs,
+      avgTokensPerSecond: overall.avgTokensPerSecond,
+      avgMsPerOutputToken: overall.avgMsPerOutputToken,
+      avgLlmCallsPerQuery: overall.avgLlmCallsPerQuery,
+      totalRetries,
+      totalJsonParseErrors,
+      semanticCacheHits: overall.semanticCacheHits,
+      cacheHitRatePct: overall.cacheHitRatePct,
       mutationsCount,
       questionsCount,
+      byModel,
     };
   }
 }

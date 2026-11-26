@@ -11,10 +11,19 @@ import {
   TokenUsage,
   CostBreakdown,
   QueryIntentType,
+  ProviderMode,
 } from "../telemetry/query-logger.js";
 
 export interface AgentTelemetry {
   latencyMs: number;
+  llmLatencyMs: number;
+  llmCallsCount: number;
+  tokensPerSecond: number;
+  msPerOutputToken: number;
+  cacheHitRatePct: number;
+  jsonParseErrorsCount: number;
+  semanticCacheHit: boolean;
+  providerType: ProviderMode;
   usage: TokenUsage;
   cost: CostBreakdown;
   model: string;
@@ -34,6 +43,8 @@ export interface AgentResponse {
 export interface ProcessPromptOptions {
   conversationId?: string;
   maxHistoryTurns?: number;
+  /** When modifying an existing staged proposal, require `propose_store_changes` instead of a plain-text reply. */
+  requireMutationProposal?: boolean;
 }
 
 interface CompactTurnMessage {
@@ -165,7 +176,12 @@ export class KhadoomAgent {
       payload.chat_template_kwargs = { enable_thinking: false };
     }
 
-    return this.openai.chat.completions.create(payload);
+    const t0 = Date.now();
+    const completion = await this.openai.chat.completions.create(payload);
+    return {
+      completion,
+      llmElapsedMs: Math.max(1, Date.now() - t0),
+    };
   }
 
   private getSystemPrompt(store: MtajirStore): string {
@@ -392,7 +408,13 @@ ROLLBACK & VERSION REVERSIONS:
       completionTokens: 0,
       totalTokens: 0,
       cachedTokens: 0,
+      reasoningTokens: 0,
     };
+    let llmLatencyMs = 0;
+    let llmCallsCount = 0;
+    let jsonParseErrorsCount = 0;
+    let semanticCacheHit = false;
+    const providerType: ProviderMode = this.baseURL ? "custom_endpoint" : "openai_api";
 
     const addUsage = (usage?: OpenAI.Completions.CompletionUsage | null) => {
       if (usage) {
@@ -401,7 +423,14 @@ ROLLBACK & VERSION REVERSIONS:
         accumulatedUsage.totalTokens += usage.total_tokens ?? 0;
         const cached = (usage.prompt_tokens_details as any)?.cached_tokens ?? 0;
         accumulatedUsage.cachedTokens += cached;
+        const reasoning = (usage.completion_tokens_details as any)?.reasoning_tokens ?? 0;
+        accumulatedUsage.reasoningTokens = (accumulatedUsage.reasoningTokens ?? 0) + reasoning;
       }
+    };
+
+    const recordLlmTiming = (elapsedMs: number) => {
+      llmLatencyMs += elapsedMs;
+      llmCallsCount++;
     };
 
     const finalize = async (
@@ -411,8 +440,29 @@ ROLLBACK & VERSION REVERSIONS:
     ): Promise<AgentResponse> => {
       const latencyMs = Date.now() - startTime;
       const cost = calculateCost(this.model, accumulatedUsage, { latencyMs });
+      const tokensPerSecond =
+        llmLatencyMs > 0 && accumulatedUsage.completionTokens > 0
+          ? Number(((accumulatedUsage.completionTokens * 1000) / llmLatencyMs).toFixed(2))
+          : 0;
+      const msPerOutputToken =
+        llmLatencyMs > 0 && accumulatedUsage.completionTokens > 0
+          ? Number((llmLatencyMs / accumulatedUsage.completionTokens).toFixed(2))
+          : 0;
+      const cacheHitRatePct =
+        accumulatedUsage.promptTokens > 0
+          ? Number(((accumulatedUsage.cachedTokens / accumulatedUsage.promptTokens) * 100).toFixed(1))
+          : 0;
+
       const telemetry: AgentTelemetry = {
         latencyMs,
+        llmLatencyMs,
+        llmCallsCount,
+        tokensPerSecond,
+        msPerOutputToken,
+        cacheHitRatePct,
+        jsonParseErrorsCount,
+        semanticCacheHit,
+        providerType,
         usage: { ...accumulatedUsage },
         cost,
         model: this.model,
@@ -424,10 +474,17 @@ ROLLBACK & VERSION REVERSIONS:
         storeId,
         userPrompt,
         model: this.model,
+        providerType,
         latencyMs,
+        llmLatencyMs,
+        llmCallsCount,
+        tokensPerSecond,
+        msPerOutputToken,
         intentType,
         toolCalls,
         retriesCount: res.retryCount ?? 0,
+        jsonParseErrorsCount,
+        semanticCacheHit,
         usage: { ...accumulatedUsage },
         cost,
         status: res.type === "error" ? "error" : "success",
@@ -474,11 +531,13 @@ ROLLBACK & VERSION REVERSIONS:
       (userPrompt.trim().split(/\s+/).length <= 3 ||
         /\b(?:it|its|that|this|those|them|one|first|second|same)\b/i.test(userPrompt));
 
-    // 1. Context-Scoped Semantic Cache check for Q&A (skip short follow-ups with active memory)
-    const cachedEntry = looksLikeContextualFollowUp
-      ? undefined
-      : await this.docsService.getCachedEntry(userPrompt, storeConstraints);
+    // 1. Context-Scoped Semantic Cache check for Q&A (skip short follow-ups & explicit proposal edits)
+    const cachedEntry =
+      looksLikeContextualFollowUp || options?.requireMutationProposal
+        ? undefined
+        : await this.docsService.getCachedEntry(userPrompt, storeConstraints);
     if (cachedEntry) {
+      semanticCacheHit = true;
       return await finalize(
         {
           type: "answer",
@@ -522,11 +581,20 @@ ROLLBACK & VERSION REVERSIONS:
       let cumulativePatches: JsonPatchOperation[] = [];
       const cumulativeExplanations: string[] = [];
       let activeNavigation: { route: string; reason: string } | null = null;
+      let forcedMutationRetry = false;
+      let nextToolChoice: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming["tool_choice"] = "auto";
 
       while (turns < maxTurns) {
         turns++;
 
-        const response = await this.createChatCompletion(messages, "auto");
+        const toolChoiceForTurn = nextToolChoice;
+        nextToolChoice = "auto";
+
+        const { completion: response, llmElapsedMs } = await this.createChatCompletion(
+          messages,
+          toolChoiceForTurn
+        );
+        recordLlmTiming(llmElapsedMs);
 
         addUsage(response.usage);
 
@@ -537,6 +605,29 @@ ROLLBACK & VERSION REVERSIONS:
 
         // If no tool calls, model gave its final conversational reply
         if (!message.tool_calls || message.tool_calls.length === 0) {
+          if (!activeStagedMutation && options?.requireMutationProposal) {
+            if (!forcedMutationRetry && turns < maxTurns) {
+              forcedMutationRetry = true;
+              messages.push({
+                role: "user",
+                content:
+                  "You replied with plain text instead of calling 'propose_store_changes'. Call the 'propose_store_changes' tool NOW with the complete updated RFC 6902 patches (preserving unchanged parts of the proposal and applying the requested feedback). Do not answer with plain text.",
+              });
+              nextToolChoice = { type: "function", function: { name: "propose_store_changes" } };
+              continue;
+            }
+
+            return await finalize(
+              {
+                type: "error",
+                message:
+                  "Agent did not generate an updated store proposal ('propose_store_changes' was not called). Your previous staged proposal was kept unchanged.",
+              },
+              "error",
+              executedTools
+            );
+          }
+
           if (activeStagedMutation && activeStagedMutation.type === "mutation_staged") {
             return await finalize(
               {
@@ -644,6 +735,7 @@ ROLLBACK & VERSION REVERSIONS:
           executedTools.push(fnName);
           const parsedArgs = parseToolArguments(toolCall.function.arguments);
           if (!parsedArgs.ok) {
+            jsonParseErrorsCount++;
             messages.push({
               role: "tool",
               tool_call_id: toolCall.id,
@@ -686,7 +778,12 @@ ROLLBACK & VERSION REVERSIONS:
               userPrompt,
               store,
               addUsage,
-              priorContext
+              priorContext,
+              3,
+              recordLlmTiming,
+              () => {
+                jsonParseErrorsCount++;
+              }
             );
 
             if (mutationRes.type === "mutation_staged" && mutationRes.stagingSession) {
@@ -790,6 +887,18 @@ ROLLBACK & VERSION REVERSIONS:
         );
       }
 
+      if (options?.requireMutationProposal) {
+        return await finalize(
+          {
+            type: "error",
+            message:
+              "Agent did not finish updating the staged store proposal ('propose_store_changes' was not completed). Your previous staged proposal was kept unchanged.",
+          },
+          "error",
+          executedTools
+        );
+      }
+
       return await finalize(
         {
           type: "answer",
@@ -824,7 +933,9 @@ ROLLBACK & VERSION REVERSIONS:
     storeSnapshot: MtajirStore,
     addUsage: (usage?: OpenAI.Completions.CompletionUsage | null) => void,
     priorContext?: OpenAI.Chat.ChatCompletionMessageParam[],
-    maxRetries = 3
+    maxRetries = 3,
+    onLlmCall?: (elapsedMs: number) => void,
+    onJsonParseError?: () => void
   ): Promise<AgentResponse> {
     let currentPatches = initialPatches;
     let currentExplanation = initialExplanation;
@@ -903,12 +1014,14 @@ Inspect live store slices with 'inspect_store_data' if any entity ID is missing 
       let fixedArgs: { explanation?: string; patches: JsonPatchOperation[] } | null = null;
       for (let step = 0; step < 3; step++) {
         const forceProposal = step === 2;
-        const correctionResponse = await this.createChatCompletion(
-          correctionMessages,
-          forceProposal
-            ? { type: "function", function: { name: "propose_store_changes" } }
-            : "auto"
-        );
+        const { completion: correctionResponse, llmElapsedMs } =
+          await this.createChatCompletion(
+            correctionMessages,
+            forceProposal
+              ? { type: "function", function: { name: "propose_store_changes" } }
+              : "auto"
+          );
+        onLlmCall?.(llmElapsedMs);
 
         addUsage(correctionResponse.usage);
 
@@ -921,6 +1034,7 @@ Inspect live store slices with 'inspect_store_data' if any entity ID is missing 
 
         const parsedToolArgs = parseToolArguments(toolCall.function.arguments);
         if (!parsedToolArgs.ok) {
+          onJsonParseError?.();
           correctionMessages.push({
             role: "tool",
             tool_call_id: toolCall.id,

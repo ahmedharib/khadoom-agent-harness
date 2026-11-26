@@ -163,15 +163,16 @@ const server = http.createServer(async (req, res) => {
       const session = stagingService.getSession(sessionId);
 
       const modifyPrompt = session
-        ? `Modify previous staged proposal "${session.explanation}" (previous patches: ${JSON.stringify(
+        ? `Modify the previous staged proposal "${session.explanation}" (previous patches: ${JSON.stringify(
             session.patches
-          )}) with this merchant feedback, preserving any unchanged parts of the proposal: ${feedback}`
+          )}) using this merchant feedback: "${feedback}". Preserve any unchanged parts of the proposal and call 'propose_store_changes' with the complete updated patch list.`
         : feedback;
 
       const turnResult = await agent.processUserPrompt(storeId, modifyPrompt, {
         conversationId: typeof conversationId === "string" && conversationId ? conversationId : undefined,
+        requireMutationProposal: true,
       });
-      if (turnResult.type !== "error") {
+      if (turnResult.type === "mutation_staged") {
         stagingService.rejectSession(sessionId);
       }
       const currentStore = await repository.getStore(storeId);
@@ -268,11 +269,16 @@ async function start() {
 
   agent = new KhadoomAgent(repository, stagingService, docsService, queryLogger);
   const llmInfo = agent.getModelConfig();
+  if (llmInfo.isCustomEndpoint && llmInfo.model === "gpt-4o-mini") {
+    console.warn("[Warning] LLM_BASE_URL is set, but LLM_MODEL is still 'gpt-4o-mini'. Set LLM_MODEL=Qwen/Qwen3-8B in .env.");
+  } else if (!llmInfo.isCustomEndpoint && /^qwen/i.test(llmInfo.model)) {
+    console.warn(`[Warning] LLM_MODEL is '${llmInfo.model}' without LLM_BASE_URL. Requests will go to OpenAI and likely fail.`);
+  }
 
   server.listen(PORT, HOST, () => {
     console.log(`\n==================================================`);
     console.log(`  KHADOOM API SERVER READY: http://${HOST}:${PORT}`);
-    console.log(`  LLM: ${llmInfo.model}${llmInfo.baseURL ? ` @ ${llmInfo.baseURL}` : " (OpenAI)"}`);
+    console.log(`  LLM: ${llmInfo.model}${llmInfo.baseURL ? ` @ ${llmInfo.baseURL} [custom_endpoint]` : " [openai_api]"}`);
     console.log(`  Store: ${store.name} (v${store.version})`);
     console.log(`==================================================\n`);
   });

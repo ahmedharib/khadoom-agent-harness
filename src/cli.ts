@@ -45,14 +45,21 @@ async function main() {
     console.warn("Please configure OPENAI_API_KEY or set LLM_BASE_URL + LLM_MODEL in .env.\n");
   }
 
-  console.log(`\nLLM Backend: ${agent.getModelConfig().model}${agent.getModelConfig().baseURL ? ` @ ${agent.getModelConfig().baseURL}` : " (OpenAI)"}`);
+  const llmCfg = agent.getModelConfig();
+  if (llmCfg.isCustomEndpoint && llmCfg.model === "gpt-4o-mini") {
+    console.warn("\n[Warning] LLM_BASE_URL is set, but LLM_MODEL is still 'gpt-4o-mini'. Set LLM_MODEL=Qwen/Qwen3-8B (matching vLLM) in .env.");
+  } else if (!llmCfg.isCustomEndpoint && /^qwen/i.test(llmCfg.model)) {
+    console.warn(`\n[Warning] LLM_MODEL is '${llmCfg.model}' without LLM_BASE_URL. Requests will go to OpenAI and likely fail.`);
+  }
+
+  console.log(`\nLLM Backend: ${llmCfg.model}${llmCfg.baseURL ? ` @ ${llmCfg.baseURL} [custom_endpoint]` : " [openai_api]"}`);
   console.log(`Active Store: ${store.name} (ID: ${store.id}) | Version: v${store.version}`);
   console.log(`Primary Color: ${store.theme.colors.primary} | Banner: ${store.theme.banner.enabled ? "Active" : "Disabled"}`);
   console.log(`Products: ${store.products.length} | Payment Gateways: ${store.paymentProviders.filter(p => p.enabled).map(p => p.name).join(", ")}`);
   console.log("\nCommands available:");
   console.log(" - Type any question (e.g., 'How do shipping zones work in Mtajir?')");
   console.log(" - Type any store change request (e.g., 'Change primary color to #2563EB and enable banner')");
-  console.log(" - '/cost'     : View cumulative token usage & API cost metrics");
+  console.log(" - '/cost'     : View cumulative token, speed & model benchmark metrics");
   console.log(" - '/history'  : View version snapshot changelog");
   console.log(" - '/rollback <v>' : Roll back live store to version <v>");
   console.log(" - '/store'    : Print current store status");
@@ -81,17 +88,29 @@ async function main() {
       continue;
     }
 
-    if (trimmed === "/cost" || trimmed === "/usage") {
+    if (trimmed === "/cost" || trimmed === "/usage" || trimmed === "/metrics") {
       const summary = await queryLogger.getSummary(storeId);
       console.log("\n==================================================");
-      console.log("      KHADOOM AI: TOKEN USAGE & COST METRICS      ");
+      console.log("   KHADOOM AI: TOKEN, LATENCY & MODEL BENCHMARKS  ");
       console.log("==================================================");
       console.log(`Total Requests:    ${summary.totalQueries} (${summary.mutationsCount} mutations, ${summary.questionsCount} questions)`);
-      console.log(`Prompt Tokens:     ${summary.totalPromptTokens.toLocaleString()} (${summary.totalCachedTokens.toLocaleString()} cached)`);
+      console.log(`Prompt Tokens:     ${summary.totalPromptTokens.toLocaleString()} (${summary.totalCachedTokens.toLocaleString()} cached, ${summary.cacheHitRatePct}% hit)`);
       console.log(`Completion Tokens: ${summary.totalCompletionTokens.toLocaleString()}`);
       console.log(`Total Tokens:      ${(summary.totalPromptTokens + summary.totalCompletionTokens).toLocaleString()}`);
-      console.log(`Average Latency:   ${summary.averageLatencyMs} ms`);
+      console.log(`Latency (Mean/P50/P95): ${summary.averageLatencyMs}ms / ${summary.p50LatencyMs}ms / ${summary.p95LatencyMs}ms`);
+      console.log(`Output Speed:      ${summary.avgTokensPerSecond} tok/s (${summary.avgMsPerOutputToken} ms/tok, ${summary.avgLlmCallsPerQuery} calls/req)`);
+      console.log(`Retries / BadJSON: ${summary.totalRetries} retries | ${summary.totalJsonParseErrors} JSON parse recoveries | ${summary.semanticCacheHits} cache hits`);
       console.log(`Cumulative Cost:   $${summary.totalCostUsd.toFixed(6)} USD`);
+      const modelKeys = Object.keys(summary.byModel);
+      if (modelKeys.length > 0) {
+        console.log("\n--- Per-Model Comparison ---");
+        for (const mName of modelKeys) {
+          const m = summary.byModel[mName];
+          console.log(
+            ` * ${mName} [${m.providerType}]: ${m.queries} req | avg ${m.avgLatencyMs}ms (p95 ${m.p95LatencyMs}ms) | ${m.avgTokensPerSecond} tok/s | retries ${m.retryRatePct}% | $${m.avgCostPerQueryUsd.toFixed(6)}/req`
+          );
+        }
+      }
       console.log("==================================================");
       continue;
     }
@@ -175,7 +194,7 @@ async function main() {
         if (currentResponse.telemetry) {
           const t = currentResponse.telemetry;
           console.log(
-            `\n[Telemetry] Model: ${t.model} | Latency: ${t.latencyMs}ms | Tokens: ${t.usage.promptTokens} in (${t.usage.cachedTokens} cached) / ${t.usage.completionTokens} out | Est. Cost: $${t.cost.totalCostUsd.toFixed(6)} USD`
+            `\n[Telemetry] Model: ${t.model} [${t.providerType}] | Latency: ${t.latencyMs}ms (LLM ${t.llmLatencyMs}ms across ${t.llmCallsCount} calls) | Speed: ${t.tokensPerSecond} tok/s (${t.msPerOutputToken} ms/tok) | Tokens: ${t.usage.promptTokens} in (${t.usage.cachedTokens} cached) / ${t.usage.completionTokens} out | Est. Cost: $${t.cost.totalCostUsd.toFixed(6)} USD`
           );
         }
 
@@ -220,7 +239,7 @@ async function main() {
             if (adjusted.telemetry) {
               const t = adjusted.telemetry;
               console.log(
-                `\n[Telemetry] Model: ${t.model} | Latency: ${t.latencyMs}ms | Tokens: ${t.usage.promptTokens} in (${t.usage.cachedTokens} cached) / ${t.usage.completionTokens} out | Est. Cost: $${t.cost.totalCostUsd.toFixed(6)} USD`
+                `\n[Telemetry] Model: ${t.model} | Latency: ${t.latencyMs}ms (${t.tokensPerSecond} tok/s) | Tokens: ${t.usage.promptTokens} in (${t.usage.cachedTokens} cached) / ${t.usage.completionTokens} out | Est. Cost: $${t.cost.totalCostUsd.toFixed(6)} USD`
               );
             }
             break;
@@ -238,7 +257,7 @@ async function main() {
     if (response.type !== "mutation_staged" && response.telemetry) {
       const t = response.telemetry;
       console.log(
-        `\n[Telemetry] Model: ${t.model} | Latency: ${t.latencyMs}ms | Tokens: ${t.usage.promptTokens} in (${t.usage.cachedTokens} cached) / ${t.usage.completionTokens} out | Est. Cost: $${t.cost.totalCostUsd.toFixed(6)} USD`
+        `\n[Telemetry] Model: ${t.model} [${t.providerType}] | Latency: ${t.latencyMs}ms (${t.tokensPerSecond} tok/s, ${t.msPerOutputToken} ms/tok) | Tokens: ${t.usage.promptTokens} in (${t.usage.cachedTokens} cached) / ${t.usage.completionTokens} out | Est. Cost: $${t.cost.totalCostUsd.toFixed(6)} USD`
       );
     }
   }

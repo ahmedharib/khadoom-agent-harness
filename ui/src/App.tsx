@@ -3,6 +3,7 @@ import {
   MtajirStore,
   ChangelogEntry,
   TelemetrySummary,
+  ModelConfigInfo,
   ChatMessage,
   StagingSession,
 } from "./types.js";
@@ -34,6 +35,7 @@ export const App: React.FC = () => {
   const [store, setStore] = useState<MtajirStore | null>(null);
   const [changelog, setChangelog] = useState<ChangelogEntry[]>([]);
   const [telemetry, setTelemetry] = useState<TelemetrySummary | null>(null);
+  const [modelConfig, setModelConfig] = useState<ModelConfigInfo | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isUpdated, setIsUpdated] = useState<boolean>(false);
@@ -55,6 +57,7 @@ export const App: React.FC = () => {
       setStore(data.store);
       setChangelog(data.changelog || []);
       setTelemetry(data.telemetry || null);
+      if (data.modelConfig) setModelConfig(data.modelConfig);
     } catch (err) {
       console.error("[Init Error]", err);
     }
@@ -215,23 +218,26 @@ export const App: React.FC = () => {
       if (!res.ok) throw new Error("Failed to modify staging session");
       const data = await res.json();
 
-      // Mark old proposal as rejected
-      setMessages((prev) =>
-        prev.map((m) => {
-          if (m.stagedMutation && m.stagedMutation.sessionId === sessionId) {
-            return {
-              ...m,
-              stagedMutation: {
-                ...m.stagedMutation,
-                status: "rejected",
-              },
-            };
-          }
-          return m;
-        })
-      );
-
       const staged: StagingSession | undefined = data.stagingSession || data.stagedMutation;
+
+      // Only discard the previous proposal if a replacement proposal was actually staged
+      if (staged) {
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.stagedMutation && m.stagedMutation.sessionId === sessionId) {
+              return {
+                ...m,
+                stagedMutation: {
+                  ...m.stagedMutation,
+                  status: "rejected",
+                },
+              };
+            }
+            return m;
+          })
+        );
+      }
+
       const updatedMsg: ChatMessage = {
         id: `asst_mod_${Date.now()}`,
         role: "assistant",
@@ -239,7 +245,7 @@ export const App: React.FC = () => {
           data.answerText ||
           (staged
             ? "Updated staged proposal based on your feedback:"
-            : data.message || data.reply || "Proposal updated based on your feedback."),
+            : data.message || data.reply || "Could not generate an updated proposal. Your previous staged proposal is still pending."),
         citations: data.citations || [],
         stagedMutation: staged,
         timestamp: new Date().toISOString(),
@@ -248,6 +254,7 @@ export const App: React.FC = () => {
       setMessages((prev) => [...prev, updatedMsg]);
       if (data.currentStore) setStore(data.currentStore);
       if (data.changelog) setChangelog(data.changelog);
+      if (data.telemetry) setTelemetry(data.telemetry);
 
       const targetTab = inferStoreTabFromSession(staged);
       if (targetTab) setActiveStoreTab(targetTab);
@@ -344,6 +351,7 @@ export const App: React.FC = () => {
       <Header
         store={store}
         telemetry={telemetry}
+        modelConfig={modelConfig}
         onReset={handleReset}
         onRollback={handleRollbackOne}
         isLoading={isLoading}

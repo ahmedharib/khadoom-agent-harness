@@ -1194,11 +1194,169 @@ async function runTests() {
   assert.equal(l4Cost.totalCostUsd, 0.000125);
   console.log("  Passed: Open-weight endpoint config, think stripping, and L4 hourly cost calculation verified.");
 
+  // Test 37 (Unified Telemetry & Per-Model Benchmark Analytics)
+  console.log("\nTest 37 (Telemetry): Testing Speed/Latency Metrics & Per-Model Aggregation...");
+  const benchLogPath = path.join(testDir, "logs", "bench-telemetry.jsonl");
+  const benchLogger = new QueryLoggerService(benchLogPath);
+  const benchAgentOpenAI = new KhadoomAgent(h5Repo, h5Staging, countingEmptyService, benchLogger, "test-key", "gpt-4o-mini");
+  const benchAgentQwen = new KhadoomAgent(h5Repo, h5Staging, countingEmptyService, benchLogger, undefined, undefined, {
+    baseURL: "http://127.0.0.1:8000/v1",
+    apiKey: "not-needed",
+    model: "Qwen/Qwen3-8B",
+  });
+
+  (benchAgentOpenAI as any).openai = {
+    chat: {
+      completions: {
+        create: async () => {
+          await new Promise((r) => setTimeout(r, 20));
+          return {
+            choices: [{ message: { role: "assistant", content: "Hello from OpenAI." } }],
+            usage: {
+              prompt_tokens: 1000,
+              completion_tokens: 40,
+              total_tokens: 1040,
+              prompt_tokens_details: { cached_tokens: 500 },
+            },
+          };
+        },
+      },
+    },
+  };
+
+  (benchAgentQwen as any).openai = {
+    chat: {
+      completions: {
+        create: async () => {
+          await new Promise((r) => setTimeout(r, 30));
+          return {
+            choices: [{ message: { role: "assistant", content: "Hello from Qwen3." } }],
+            usage: { prompt_tokens: 1000, completion_tokens: 60, total_tokens: 1060 },
+          };
+        },
+      },
+    },
+  };
+
+  const openaiTurn = await benchAgentOpenAI.processUserPrompt(validStore.id, "hi");
+  const qwenTurn = await benchAgentQwen.processUserPrompt(validStore.id, "hi");
+
+  assert.equal(openaiTurn.telemetry?.providerType, "openai_api");
+  assert.equal(openaiTurn.telemetry?.cacheHitRatePct, 50);
+  assert.ok((openaiTurn.telemetry?.llmLatencyMs ?? 0) >= 15);
+  assert.ok((openaiTurn.telemetry?.tokensPerSecond ?? 0) > 0);
+  assert.ok((openaiTurn.telemetry?.msPerOutputToken ?? 0) > 0);
+  assert.equal(openaiTurn.telemetry?.llmCallsCount, 1);
+
+  assert.equal(qwenTurn.telemetry?.providerType, "custom_endpoint");
+  assert.ok((qwenTurn.telemetry?.tokensPerSecond ?? 0) > 0);
+
+  const benchSummary = await benchLogger.getSummary(validStore.id);
+  assert.equal(benchSummary.totalQueries, 2);
+  assert.ok(benchSummary.p50LatencyMs > 0);
+  assert.ok(benchSummary.p95LatencyMs >= benchSummary.p50LatencyMs);
+  assert.ok(benchSummary.byModel["gpt-4o-mini"], "Summary must include gpt-4o-mini bucket");
+  assert.ok(benchSummary.byModel["Qwen/Qwen3-8B"], "Summary must include Qwen/Qwen3-8B bucket");
+  assert.equal(benchSummary.byModel["gpt-4o-mini"].providerType, "openai_api");
+  assert.equal(benchSummary.byModel["Qwen/Qwen3-8B"].providerType, "custom_endpoint");
+  assert.equal(benchSummary.byModel["gpt-4o-mini"].cacheHitRatePct, 50);
+  console.log("  Passed: Telemetry speed, latency percentiles, and per-model benchmarks verified.");
+
+  // Test 38 (Modify Proposal Tool Enforcement)
+  console.log("\nTest 38 (Modify Enforcement): Testing Forced 'propose_store_changes' Retry & Error Guard...");
+  let modifyTurnCount = 0;
+  let sawForcedToolChoice: any = null;
+  const modifyAgent = new KhadoomAgent(h5Repo, h5Staging, countingEmptyService, c3Logger, undefined, undefined, {
+    baseURL: "http://127.0.0.1:8000/v1",
+    apiKey: "not-needed",
+    model: "Qwen/Qwen3-8B",
+  });
+  (modifyAgent as any).openai = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          modifyTurnCount++;
+          if (modifyTurnCount === 1) {
+            return {
+              choices: [{ message: { role: "assistant", content: "Updated Huila to 60 SAR!" } }],
+              usage: { prompt_tokens: 1500, completion_tokens: 20, total_tokens: 1520 },
+            };
+          }
+          if (modifyTurnCount === 2) {
+            sawForcedToolChoice = params.tool_choice;
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "call_mod_forced_1",
+                        type: "function",
+                        function: {
+                          name: "propose_store_changes",
+                          arguments: JSON.stringify({
+                            explanation: "Set Ethiopian Yirgacheffe to 70 and Colombian Huila to 60.",
+                            patches: [
+                              { op: "replace", path: "/products[id=prod_001]/price", value: 70 },
+                              { op: "replace", path: "/products[id=prod_002]/price", value: 60 },
+                            ],
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 1800, completion_tokens: 45, total_tokens: 1845 },
+            };
+          }
+          return {
+            choices: [{ message: { role: "assistant", content: "Proposal staged for review." } }],
+            usage: { prompt_tokens: 1900, completion_tokens: 12, total_tokens: 1912 },
+          };
+        },
+      },
+    },
+  };
+
+  const modifyRecovered = await modifyAgent.processUserPrompt(
+    validStore.id,
+    "Modify previous staged proposal: huila 60",
+    { requireMutationProposal: true }
+  );
+  assert.equal(modifyRecovered.type, "mutation_staged");
+  assert.deepEqual(sawForcedToolChoice, { type: "function", function: { name: "propose_store_changes" } });
+  assert.equal(modifyRecovered.stagingSession?.patches.length, 2);
+  if (modifyRecovered.stagingSession) {
+    h5Staging.rejectSession(modifyRecovered.stagingSession.sessionId);
+  }
+
+  (modifyAgent as any).openai = {
+    chat: {
+      completions: {
+        create: async () => ({
+          choices: [{ message: { role: "assistant", content: "Changes applied!" } }],
+          usage: { prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010 },
+        }),
+      },
+    },
+  };
+  const modifyRefused = await modifyAgent.processUserPrompt(
+    validStore.id,
+    "Modify previous staged proposal: huila 60",
+    { requireMutationProposal: true }
+  );
+  assert.equal(modifyRefused.type, "error");
+  assert.match(modifyRefused.message, /propose_store_changes/i);
+  console.log("  Passed: Modify tool enforcement forced retry and error guard verified.");
+
   // Clean up test directory again
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 36 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  console.log(" ALL 38 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 

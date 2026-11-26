@@ -121,6 +121,27 @@ export interface ChangelogEntry {
   patches: JsonPatchOp[];
 }
 
+export interface ModelBenchmarkSummary {
+  queries: number;
+  providerType: "openai_api" | "custom_endpoint" | "mixed";
+  avgPromptTokens: number;
+  avgCompletionTokens: number;
+  cacheHitRatePct: number;
+  totalCostUsd: number;
+  avgCostPerQueryUsd: number;
+  avgLatencyMs: number;
+  p50LatencyMs: number;
+  p95LatencyMs: number;
+  avgLlmLatencyMs: number;
+  avgTokensPerSecond: number;
+  avgMsPerOutputToken: number;
+  avgLlmCallsPerQuery: number;
+  retryRatePct: number;
+  jsonParseErrorCount: number;
+  errorRatePct: number;
+  semanticCacheHits: number;
+}
+
 export interface TelemetrySummary {
   totalQueries: number;
   mutationsCount: number;
@@ -130,6 +151,24 @@ export interface TelemetrySummary {
   totalCompletionTokens: number;
   totalCostUsd: number;
   averageLatencyMs: number;
+  p50LatencyMs?: number;
+  p95LatencyMs?: number;
+  avgLlmLatencyMs?: number;
+  avgTokensPerSecond?: number;
+  avgMsPerOutputToken?: number;
+  avgLlmCallsPerQuery?: number;
+  totalRetries?: number;
+  totalJsonParseErrors?: number;
+  semanticCacheHits?: number;
+  cacheHitRatePct?: number;
+  byModel?: Record<string, ModelBenchmarkSummary>;
+}
+
+export interface ModelConfigInfo {
+  model: string;
+  baseURL?: string;
+  isCustomEndpoint: boolean;
+  disableThinking: boolean;
 }
 
 export interface ChatMessage {
