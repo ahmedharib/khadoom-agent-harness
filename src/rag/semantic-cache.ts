@@ -221,9 +221,19 @@ export class SemanticCache {
     if (!this.persistPath || !fsSync.existsSync(this.persistPath)) return;
     try {
       const parsed = JSON.parse(fsSync.readFileSync(this.persistPath, "utf-8"));
+      const activeModel = this.embeddingsService.getEffectiveModelId?.();
+      const expectedDim = this.embeddingsService.getExpectedDimensions?.();
+      if (parsed.embeddingModel && activeModel && parsed.embeddingModel !== activeModel) {
+        this.entries = [];
+        return;
+      }
       if (Array.isArray(parsed.entries)) {
         this.entries = parsed.entries.filter(
-          (e: SemanticCacheEntry) => e.corpusHash === this.corpusHash
+          (e: SemanticCacheEntry) =>
+            e.corpusHash === this.corpusHash &&
+            Array.isArray(e.queryVector) &&
+            e.queryVector.length > 0 &&
+            (expectedDim === undefined || e.queryVector.length === expectedDim)
         );
       }
     } catch {
@@ -234,9 +244,16 @@ export class SemanticCache {
   private async saveToDisk(): Promise<void> {
     if (!this.persistPath) return;
     await fs.mkdir(path.dirname(this.persistPath), { recursive: true });
+    const embeddingModel = this.embeddingsService.getEffectiveModelId?.();
+    const dimensions = this.entries[0]?.queryVector?.length ?? this.embeddingsService.getExpectedDimensions?.();
     await fs.writeFile(
       this.persistPath,
-      JSON.stringify({ corpusHash: this.corpusHash, entries: this.entries }),
+      JSON.stringify({
+        corpusHash: this.corpusHash,
+        embeddingModel,
+        dimensions,
+        entries: this.entries,
+      }),
       "utf-8"
     );
   }

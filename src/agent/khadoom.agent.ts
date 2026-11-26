@@ -31,6 +31,25 @@ export interface AgentResponse {
   telemetry?: AgentTelemetry;
 }
 
+export interface ProcessPromptOptions {
+  conversationId?: string;
+  maxHistoryTurns?: number;
+}
+
+interface CompactTurnMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+const MAX_MEMORY_SESSIONS = 100;
+const MAX_STORED_TURN_CHARS = 450;
+
+function truncateForMemory(text: string, maxChars = MAX_STORED_TURN_CHARS): string {
+  const clean = text.trim();
+  if (clean.length <= maxChars) return clean;
+  return `${clean.slice(0, maxChars - 3)}...`;
+}
+
 export class KhadoomAgent {
   private openai: OpenAI;
   private repository: StoreRepository;
@@ -38,6 +57,7 @@ export class KhadoomAgent {
   private docsService: DocsService;
   private queryLogger: QueryLoggerService;
   private model: string;
+  private sessionMemory: Map<string, CompactTurnMessage[]> = new Map();
 
   constructor(
     repository: StoreRepository,
@@ -224,7 +244,57 @@ ROLLBACK & VERSION REVERSIONS:
     ];
   }
 
-  async processUserPrompt(storeId: string, userPrompt: string): Promise<AgentResponse> {
+  public clearConversation(conversationId: string): void {
+    this.sessionMemory.delete(conversationId);
+  }
+
+  public getConversationHistory(conversationId: string): CompactTurnMessage[] {
+    return [...(this.sessionMemory.get(conversationId) ?? [])];
+  }
+
+  private recordConversationTurn(
+    conversationId: string,
+    userPrompt: string,
+    res: AgentResponse,
+    maxHistoryTurns = 3
+  ): void {
+    if (res.type === "error") return;
+
+    let assistantSummary = res.message || "Done.";
+    if (res.type === "mutation_staged") {
+      assistantSummary = res.answerText
+        ? `${res.answerText} [Staged proposal: ${res.message}]`
+        : `[Staged proposal: ${res.message}]`;
+    } else if (res.type === "navigation") {
+      assistantSummary = res.answerText
+        ? `${res.answerText} [Navigated to ${res.navigationRoute}]`
+        : `[Navigated to ${res.navigationRoute}: ${res.message}]`;
+    }
+
+    const existing = this.sessionMemory.get(conversationId) ?? [];
+    const updated: CompactTurnMessage[] = [
+      ...existing,
+      { role: "user", content: truncateForMemory(userPrompt) },
+      { role: "assistant", content: truncateForMemory(assistantSummary) },
+    ];
+
+    const maxMessages = Math.max(2, maxHistoryTurns * 2);
+    const trimmed = updated.slice(-maxMessages);
+
+    // Refresh insertion order for simple LRU capping
+    this.sessionMemory.delete(conversationId);
+    this.sessionMemory.set(conversationId, trimmed);
+    if (this.sessionMemory.size > MAX_MEMORY_SESSIONS) {
+      const oldestKey = this.sessionMemory.keys().next().value;
+      if (oldestKey) this.sessionMemory.delete(oldestKey);
+    }
+  }
+
+  async processUserPrompt(
+    storeId: string,
+    userPrompt: string,
+    options?: ProcessPromptOptions
+  ): Promise<AgentResponse> {
     const startTime = Date.now();
     const accumulatedUsage: TokenUsage = {
       promptTokens: 0,
@@ -273,6 +343,15 @@ ROLLBACK & VERSION REVERSIONS:
         errorMessage: res.type === "error" ? res.message : undefined,
       });
 
+      if (options?.conversationId) {
+        this.recordConversationTurn(
+          options.conversationId,
+          userPrompt,
+          res,
+          options.maxHistoryTurns ?? 3
+        );
+      }
+
       return {
         ...res,
         telemetry,
@@ -296,8 +375,18 @@ ROLLBACK & VERSION REVERSIONS:
       country: store.shippingZones?.[0]?.countries?.[0],
     };
 
-    // 1. Context-Scoped Semantic Cache check for Q&A
-    const cachedEntry = await this.docsService.getCachedEntry(userPrompt, storeConstraints);
+    const priorHistory = options?.conversationId
+      ? this.sessionMemory.get(options.conversationId) ?? []
+      : [];
+    const looksLikeContextualFollowUp =
+      priorHistory.length > 0 &&
+      (userPrompt.trim().split(/\s+/).length <= 3 ||
+        /\b(?:it|its|that|this|those|them|one|first|second|same)\b/i.test(userPrompt));
+
+    // 1. Context-Scoped Semantic Cache check for Q&A (skip short follow-ups with active memory)
+    const cachedEntry = looksLikeContextualFollowUp
+      ? undefined
+      : await this.docsService.getCachedEntry(userPrompt, storeConstraints);
     if (cachedEntry) {
       return await finalize(
         {
@@ -329,6 +418,7 @@ ROLLBACK & VERSION REVERSIONS:
 
     const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
       { role: "system", content: this.getSystemPrompt(store) },
+      ...priorHistory.map((m) => ({ role: m.role, content: m.content })),
       { role: "user", content: userPrompt },
     ];
 
@@ -338,6 +428,8 @@ ROLLBACK & VERSION REVERSIONS:
       const executedTools: string[] = [];
       const citations: string[] = [];
       let activeStagedMutation: AgentResponse | null = null;
+      let cumulativePatches: JsonPatchOperation[] = [];
+      const cumulativeExplanations: string[] = [];
       let activeNavigation: { route: string; reason: string } | null = null;
 
       while (turns < maxTurns) {
@@ -416,16 +508,32 @@ ROLLBACK & VERSION REVERSIONS:
             );
           const effectiveCitations = isNegativeOrOutOfScope ? [] : citations;
 
-          const finalIntent: QueryIntentType =
-            effectiveCitations.length > 0
-              ? "doc_question"
-              : executedTools.includes("inspect_store_data")
-              ? "store_inspection"
-              : executedTools.includes("navigate_to_settings_page")
-              ? "navigation"
-              : "conversation";
+          const usedInspectTool = executedTools.includes("inspect_store_data");
+          const usedMutationOrNavTool =
+            executedTools.includes("propose_store_changes") ||
+            executedTools.includes("navigate_to_settings_page");
+          const mentionsTenantIdentity =
+            store.name.trim().length > 2 &&
+            (message.content || "").toLowerCase().includes(store.name.trim().toLowerCase());
 
-          if (effectiveCitations.length > 0 && message.content && !activeStagedMutation) {
+          const finalIntent: QueryIntentType = usedInspectTool
+            ? "store_inspection"
+            : effectiveCitations.length > 0
+            ? "doc_question"
+            : executedTools.includes("navigate_to_settings_page")
+            ? "navigation"
+            : "conversation";
+
+          // Never write tenant/store-specific state into the shared SemanticCache (C3)
+          const isPureDocsAnswer =
+            effectiveCitations.length > 0 &&
+            Boolean(message.content) &&
+            !activeStagedMutation &&
+            !usedInspectTool &&
+            !usedMutationOrNavTool &&
+            !mentionsTenantIdentity;
+
+          if (isPureDocsAnswer && message.content) {
             await this.docsService.setCachedAnswer(
               userPrompt,
               message.content,
@@ -452,15 +560,41 @@ ROLLBACK & VERSION REVERSIONS:
           const args = JSON.parse(toolCall.function.arguments);
 
           if (fnName === "propose_store_changes") {
+            const incomingPatches: JsonPatchOperation[] = Array.isArray(args.patches)
+              ? args.patches
+              : [];
+            const prevSessionId = activeStagedMutation?.stagingSession?.sessionId;
+            const mergedPatches =
+              cumulativePatches.length > 0
+                ? [...cumulativePatches, ...incomingPatches]
+                : incomingPatches;
+            const mergedExplanation =
+              cumulativeExplanations.length > 0
+                ? [...cumulativeExplanations, args.explanation].filter(Boolean).join("; ")
+                : args.explanation;
+
+            // Snapshot transcript prior to the current tool-call assistant turn so retries keep
+            // all earlier `inspect_store_data` and `search_documentation` context (H5).
+            const priorContext = messages.slice(0, -1);
+
             const mutationRes = await this.handleMutationWithSelfCorrection(
               storeId,
               store.version,
-              args.explanation,
-              args.patches,
+              mergedExplanation,
+              mergedPatches,
               userPrompt,
               store,
-              addUsage
+              addUsage,
+              priorContext
             );
+
+            if (mutationRes.type === "mutation_staged" && mutationRes.stagingSession) {
+              if (prevSessionId && prevSessionId !== mutationRes.stagingSession.sessionId) {
+                this.stagingService.rejectSession(prevSessionId);
+              }
+              cumulativePatches = [...mutationRes.stagingSession.patches];
+              if (args.explanation) cumulativeExplanations.push(args.explanation);
+            }
             activeStagedMutation = mutationRes;
 
             messages.push({
@@ -588,11 +722,21 @@ ROLLBACK & VERSION REVERSIONS:
     originalPrompt: string,
     storeSnapshot: MtajirStore,
     addUsage: (usage?: OpenAI.Completions.CompletionUsage | null) => void,
+    priorContext?: OpenAI.Chat.ChatCompletionMessageParam[],
     maxRetries = 3
   ): Promise<AgentResponse> {
     let currentPatches = initialPatches;
     let currentExplanation = initialExplanation;
     let attempts = 0;
+
+    // Seed correction thread with inspected store slices & RAG context instead of starting blind (H5).
+    const correctionMessages: OpenAI.Chat.ChatCompletionMessageParam[] =
+      priorContext && priorContext.length > 0
+        ? [...priorContext]
+        : [
+            { role: "system", content: this.getSystemPrompt(storeSnapshot) },
+            { role: "user", content: originalPrompt },
+          ];
 
     while (attempts <= maxRetries) {
       const stageResult = await this.stagingService.stageMutation(
@@ -618,6 +762,14 @@ ROLLBACK & VERSION REVERSIONS:
         };
       }
 
+      // Version mismatch cannot be fixed by rewriting JSON patches — fail fast without burning retries (H5).
+      if (stageResult.errorType === "CONCURRENCY_CONFLICT") {
+        return {
+          type: "error",
+          message: stageResult.errorMessage,
+        };
+      }
+
       attempts++;
       if (attempts > maxRetries) {
         return {
@@ -633,7 +785,7 @@ ROLLBACK & VERSION REVERSIONS:
             .join("\n")
         : stageResult.errorMessage;
 
-      const correctionPrompt = `The previous RFC 6902 patch failed schema validation:
+      const correctionPrompt = `The previous RFC 6902 patch failed validation:
 Error details:
 ${errorDetails}
 
@@ -642,33 +794,71 @@ ${JSON.stringify(currentPatches, null, 2)}
 
 Original user request: "${originalPrompt}"
 
-Please output a corrected RFC 6902 patch that satisfies the schema constraints and fixes the above errors.`;
+Inspect live store slices with 'inspect_store_data' if any entity ID is missing or invalid, then call 'propose_store_changes' with a corrected patch.`;
 
-      const correctionResponse = await this.openai.chat.completions.create({
-        model: this.model,
-        messages: [
-          { role: "system", content: this.getSystemPrompt(storeSnapshot) },
-          { role: "user", content: correctionPrompt },
-        ],
-        tools: this.getToolDefinitions(),
-        tool_choice: { type: "function", function: { name: "propose_store_changes" } },
-        parallel_tool_calls: false,
-        temperature: 0.1,
-      });
+      correctionMessages.push({ role: "user", content: correctionPrompt });
 
-      addUsage(correctionResponse.usage);
+      // Allow inspect_store_data up to 2 inner steps before forcing propose_store_changes
+      let fixedArgs: { explanation?: string; patches: JsonPatchOperation[] } | null = null;
+      for (let step = 0; step < 3; step++) {
+        const forceProposal = step === 2;
+        const correctionResponse = await this.openai.chat.completions.create({
+          model: this.model,
+          messages: correctionMessages,
+          tools: this.getToolDefinitions(),
+          tool_choice: forceProposal
+            ? { type: "function", function: { name: "propose_store_changes" } }
+            : "auto",
+          parallel_tool_calls: false,
+          temperature: 0.1,
+        });
 
-      const toolCall = correctionResponse.choices[0]?.message?.tool_calls?.[0];
-      if (!toolCall) {
+        addUsage(correctionResponse.usage);
+
+        const assistantMsg = correctionResponse.choices[0]?.message;
+        if (!assistantMsg) break;
+        correctionMessages.push(assistantMsg);
+
+        const toolCall = assistantMsg.tool_calls?.[0];
+        if (!toolCall) break;
+
+        if (toolCall.function.name === "propose_store_changes") {
+          fixedArgs = JSON.parse(toolCall.function.arguments);
+          correctionMessages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: "Received replacement patch for validation.",
+          });
+          break;
+        }
+
+        if (toolCall.function.name === "inspect_store_data") {
+          const inspectArgs = JSON.parse(toolCall.function.arguments);
+          const slicePath = inspectArgs.path || "/";
+          const dataSlice = slicePath === "/" ? storeSnapshot : this.getValueAtPath(storeSnapshot, slicePath);
+          correctionMessages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(dataSlice ?? "Not found", null, 2),
+          });
+        } else {
+          correctionMessages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: "Use 'inspect_store_data' or 'propose_store_changes' to repair the patch.",
+          });
+        }
+      }
+
+      if (!fixedArgs || !Array.isArray(fixedArgs.patches)) {
         return {
           type: "error",
           message: "Self-correction failed: model did not return a replacement patch.",
         };
       }
 
-      const args = JSON.parse(toolCall.function.arguments);
-      currentPatches = args.patches;
-      currentExplanation = args.explanation || currentExplanation;
+      currentPatches = fixedArgs.patches;
+      currentExplanation = fixedArgs.explanation || currentExplanation;
     }
 
     return {

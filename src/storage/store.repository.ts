@@ -110,11 +110,20 @@ export class StoreRepository {
     storeId: string,
     updatedStore: MtajirStore,
     explanation: string,
-    appliedPatches: JsonPatchOperation[]
+    appliedPatches: JsonPatchOperation[],
+    expectedBaseVersion?: number
   ): Promise<MtajirStore> {
     const current = await this.getStore(storeId);
     if (!current) {
       throw new Error(`Store with id '${storeId}' does not exist`);
+    }
+
+    if (expectedBaseVersion !== undefined && current.version !== expectedBaseVersion) {
+      const conflictErr: any = new Error(
+        `CONCURRENCY_CONFLICT: Store version changed from v${expectedBaseVersion} to v${current.version} before commit. Please re-stage changes against the latest store state.`
+      );
+      conflictErr.code = "CONCURRENCY_CONFLICT";
+      throw conflictErr;
     }
 
     // Load changelog to compute the high-water mark version

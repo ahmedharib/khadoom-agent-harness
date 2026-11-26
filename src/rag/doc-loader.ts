@@ -56,8 +56,24 @@ function resolveDefaultDocsDir(): string {
   return cwdCandidate;
 }
 
+function parseBracketArray(rawArray: string): string[] {
+  try {
+    const parsed = JSON.parse(rawArray);
+    if (Array.isArray(parsed)) return parsed.map(String);
+  } catch {
+    // Handle Prettier trailing commas or single-quoted YAML items
+  }
+  return rawArray
+    .slice(1, -1)
+    .split(",")
+    .map((s) => s.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+}
+
 /**
  * Parses YAML frontmatter block delimited by `---` at the top of a Markdown file.
+ * Supports single-line arrays, Prettier-formatted multi-line `[ ... ]` arrays,
+ * and YAML `- item` lists.
  */
 export function parseFrontmatterAndBody(rawMarkdown: string): {
   frontmatter: DocFrontmatter;
@@ -81,10 +97,12 @@ export function parseFrontmatterAndBody(rawMarkdown: string): {
   const yamlBlock = match[1];
   const body = match[2].trim();
   const parsed: Record<string, any> = {};
+  const lines = yamlBlock.split("\n");
 
-  for (const rawLine of yamlBlock.split("\n")) {
-    const line = rawLine.trim();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
     if (!line || line.startsWith("#")) continue;
+
     const colonIdx = line.indexOf(":");
     if (colonIdx === -1) continue;
 
@@ -92,14 +110,53 @@ export function parseFrontmatterAndBody(rawMarkdown: string): {
     const valStr = line.slice(colonIdx + 1).trim();
 
     if (valStr.startsWith("[") && valStr.endsWith("]")) {
-      try {
-        parsed[key] = JSON.parse(valStr);
-      } catch {
-        parsed[key] = valStr
-          .slice(1, -1)
-          .split(",")
-          .map((s) => s.trim().replace(/^["']|["']$/g, ""))
-          .filter(Boolean);
+      parsed[key] = parseBracketArray(valStr);
+    } else if (valStr.startsWith("[")) {
+      // Multi-line array starting on the key line: `tags: [` ... `]`
+      const parts = [valStr];
+      while (i + 1 < lines.length && !parts[parts.length - 1].endsWith("]")) {
+        i++;
+        const nextLine = lines[i].trim();
+        if (nextLine && !nextLine.startsWith("#")) {
+          parts.push(nextLine);
+        }
+      }
+      parsed[key] = parseBracketArray(parts.join(" "));
+    } else if (valStr === "") {
+      // Check following lines for Prettier-indented `[ ... ]` or YAML `- item` list
+      let lookahead = i + 1;
+      while (lookahead < lines.length && (!lines[lookahead].trim() || lines[lookahead].trim().startsWith("#"))) {
+        lookahead++;
+      }
+
+      if (lookahead < lines.length && lines[lookahead].trim().startsWith("[")) {
+        const parts: string[] = [];
+        i = lookahead - 1;
+        while (i + 1 < lines.length) {
+          i++;
+          const nextLine = lines[i].trim();
+          if (nextLine && !nextLine.startsWith("#")) {
+            parts.push(nextLine);
+            if (nextLine.endsWith("]")) break;
+          }
+        }
+        parsed[key] = parseBracketArray(parts.join(" "));
+      } else if (lookahead < lines.length && lines[lookahead].trim().startsWith("- ")) {
+        const items: string[] = [];
+        i = lookahead - 1;
+        while (i + 1 < lines.length) {
+          const peek = lines[i + 1].trim();
+          if (!peek || peek.startsWith("#")) {
+            i++;
+            continue;
+          }
+          if (!peek.startsWith("- ")) break;
+          i++;
+          items.push(peek.slice(2).trim().replace(/^["']|["']$/g, ""));
+        }
+        parsed[key] = items;
+      } else {
+        parsed[key] = "";
       }
     } else if (valStr === "true" || valStr === "false") {
       parsed[key] = valStr === "true";

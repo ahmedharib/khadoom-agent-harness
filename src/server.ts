@@ -96,12 +96,14 @@ const server = http.createServer(async (req, res) => {
     // 2. POST /api/chat - Send merchant prompt to Khadoom
     if (req.method === "POST" && pathname === "/api/chat") {
       const body = await parseJsonBody(req);
-      const { prompt } = body;
+      const { prompt, conversationId } = body;
       if (!prompt || typeof prompt !== "string") {
         return sendJson(res, 400, { error: "prompt is required" });
       }
 
-      const turnResult = await agent.processUserPrompt(storeId, prompt.trim());
+      const turnResult = await agent.processUserPrompt(storeId, prompt.trim(), {
+        conversationId: typeof conversationId === "string" && conversationId ? conversationId : undefined,
+      });
       const currentStore = await repository.getStore(storeId);
       const changelog = await repository.getChangelog(storeId);
       const telemetry = await queryLogger.getSummary(storeId);
@@ -122,13 +124,20 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 400, { error: "sessionId is required" });
       }
 
-      const committedStore = await stagingService.commitSession(sessionId);
-      const changelog = await repository.getChangelog(storeId);
-      return sendJson(res, 200, {
-        success: true,
-        store: committedStore,
-        changelog,
-      });
+      try {
+        const committedStore = await stagingService.commitSession(sessionId);
+        const changelog = await repository.getChangelog(storeId);
+        return sendJson(res, 200, {
+          success: true,
+          store: committedStore,
+          changelog,
+        });
+      } catch (commitErr: any) {
+        if (commitErr.code === "CONCURRENCY_CONFLICT") {
+          return sendJson(res, 409, { error: commitErr.message, code: "CONCURRENCY_CONFLICT" });
+        }
+        throw commitErr;
+      }
     }
 
     // 4. POST /api/staging/reject - Reject staged mutation
@@ -146,13 +155,12 @@ const server = http.createServer(async (req, res) => {
     // 5. POST /api/staging/modify - Tweak staged mutation with feedback
     if (req.method === "POST" && pathname === "/api/staging/modify") {
       const body = await parseJsonBody(req);
-      const { sessionId, feedback } = body;
+      const { sessionId, feedback, conversationId } = body;
       if (!sessionId || !feedback) {
         return sendJson(res, 400, { error: "sessionId and feedback are required" });
       }
 
       const session = stagingService.getSession(sessionId);
-      stagingService.rejectSession(sessionId);
 
       const modifyPrompt = session
         ? `Modify previous staged proposal "${session.explanation}" (previous patches: ${JSON.stringify(
@@ -160,7 +168,12 @@ const server = http.createServer(async (req, res) => {
           )}) with this merchant feedback, preserving any unchanged parts of the proposal: ${feedback}`
         : feedback;
 
-      const turnResult = await agent.processUserPrompt(storeId, modifyPrompt);
+      const turnResult = await agent.processUserPrompt(storeId, modifyPrompt, {
+        conversationId: typeof conversationId === "string" && conversationId ? conversationId : undefined,
+      });
+      if (turnResult.type !== "error") {
+        stagingService.rejectSession(sessionId);
+      }
       const currentStore = await repository.getStore(storeId);
       const changelog = await repository.getChangelog(storeId);
       const telemetry = await queryLogger.getSummary(storeId);
@@ -192,6 +205,10 @@ const server = http.createServer(async (req, res) => {
 
     // 7. POST /api/store/reset - Reset store back to seed v1
     if (req.method === "POST" && pathname === "/api/store/reset") {
+      const body = await parseJsonBody(req).catch(() => ({}));
+      if (typeof body?.conversationId === "string" && body.conversationId) {
+        agent.clearConversation(body.conversationId);
+      }
       const resetStore = await repository.saveInitialStore(SEED_STORE);
       const changelog = await repository.getChangelog(storeId);
       return sendJson(res, 200, {

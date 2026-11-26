@@ -127,14 +127,19 @@ export class HybridSearchEngine {
     if (allowedChunkIds.size === 0) return [];
 
     const bm25Results = this.bm25.search(query, allowedChunkIds, limit * 3);
-    const queryVector = await this.embeddingsService.embedText(query);
-    const rawVectorResults = this.embeddingsService.searchVectors(
-      queryVector,
-      this.chunks,
-      allowedChunkIds,
-      limit * 3
-    );
-    const vectorResults = rawVectorResults.filter((r) => r.similarity >= minSim);
+
+    await this.embeddingsService.ensureLoaded();
+    let vectorResults: ReturnType<EmbeddingsService["searchVectors"]> = [];
+    if (this.embeddingsService.getCachedVectorCount() > 0) {
+      const queryVector = await this.embeddingsService.embedText(query);
+      const rawVectorResults = this.embeddingsService.searchVectors(
+        queryVector,
+        this.chunks,
+        allowedChunkIds,
+        limit * 3
+      );
+      vectorResults = rawVectorResults.filter((r) => r.similarity >= minSim);
+    }
 
     return computeReciprocalRankFusion(bm25Results, vectorResults, rrfK, limit);
   }

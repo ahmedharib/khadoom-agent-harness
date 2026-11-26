@@ -6,7 +6,8 @@ import { SEED_STORE } from "../src/data/seed-store.js";
 import { StoreRepository } from "../src/storage/store.repository.js";
 import { StagingService } from "../src/staging/staging.service.js";
 import { generateSemanticDiff } from "../src/diff/semantic-diff.js";
-import { DocsService, FileEmbeddingsStore } from "../src/rag/docs.service.js";
+import { DocsService, FileEmbeddingsStore, InMemoryEmbeddingsStore } from "../src/rag/docs.service.js";
+import { cosineSimilarity } from "../src/rag/embeddings.js";
 import { loadDocumentationCorpus } from "../src/rag/doc-loader.js";
 import { BM25SearchEngine, normalizeAndTokenize } from "../src/rag/bm25-search.js";
 import { JsonPatchOperation } from "../src/schema/patch.schema.js";
@@ -38,7 +39,11 @@ async function runTests() {
     return vec.map((v) => Number((v / norm).toFixed(6)));
   };
 
-  const docsService = new DocsService({ embedder: testEmbedder });
+  const docsService = new DocsService({
+    embeddingsStore: new InMemoryEmbeddingsStore(),
+    embedder: testEmbedder,
+    persistCachePath: path.join(testDir, "cache", "semantic-cache-unit.json"),
+  });
 
   // Test 1: Zod Schema Validation on Seed Store
   console.log("Test 1: Validating Seed Store with Zod...");
@@ -445,8 +450,13 @@ async function runTests() {
   // Test 23: EmbeddingsStore Repository Adapter & MD5 Hash Persistence
   console.log("\nTest 23: Testing FileEmbeddingsStore Persistence & MD5 Deduplication...");
   const testEmbeddingsPath = path.join(testDir, "embeddings", "doc-embeddings.json");
+  const testCachePath = path.join(testDir, "cache", "semantic-cache.json");
   const fileEmbeddingsStore = new FileEmbeddingsStore(testEmbeddingsPath);
-  const ragService = new DocsService({ embeddingsStore: fileEmbeddingsStore, embedder: testEmbedder });
+  const ragService = new DocsService({
+    embeddingsStore: fileEmbeddingsStore,
+    embedder: testEmbedder,
+    persistCachePath: testCachePath,
+  });
   await ragService.syncCorpusAndEmbeddings();
 
   const persistedMap = await fileEmbeddingsStore.loadEmbeddings();
@@ -522,11 +532,550 @@ async function runTests() {
     "  Passed: Semantic cache verified paraphrase hit (>=0.94), cross-currency isolation, and corpus-hash invalidation."
   );
 
+  // Test 26 (C1): Dimension Mismatch Rejection & Legacy/Mixed Embeddings Invalidation
+  console.log("\nTest 26 (C1): Testing Embeddings Dimension & Model Validation...");
+  assert.equal(cosineSimilarity([1, 0], [1, 0, 0]), 0, "cosineSimilarity must reject mismatched vector lengths");
+
+  const mixedEmbPath = path.join(testDir, "embeddings", "mixed-embeddings.json");
+  await fs.mkdir(path.dirname(mixedEmbPath), { recursive: true });
+  const mixedPayload = {
+    corpusHash: corpus.corpusHash,
+    updatedAt: new Date().toISOString(),
+    items: corpus.chunks.map((c, idx) => ({
+      chunkId: c.chunkId,
+      hash: c.hash,
+      vector: new Array(idx === 0 ? 1536 : 256).fill(0.1),
+    })),
+  };
+  await fs.writeFile(mixedEmbPath, JSON.stringify(mixedPayload), "utf-8");
+
+  const mixedStore = new FileEmbeddingsStore(mixedEmbPath);
+  const c1DocsService = new DocsService({
+    embeddingsStore: mixedStore,
+    embedder: testEmbedder,
+    persistCachePath: path.join(testDir, "cache", "c1-cache.json"),
+  });
+  const firstSync = await c1DocsService.syncCorpusAndEmbeddings();
+  assert.equal(firstSync.newChunks, corpus.chunks.length, "Legacy mixed-dimension embeddings must all be re-embedded");
+  const repairedMeta = await mixedStore.getMetadata();
+  assert.equal(repairedMeta?.dimensions, 32);
+  assert.equal(repairedMeta?.model, "custom:text-embedding-3-small");
+
+  const c1SecondService = new DocsService({
+    embeddingsStore: new FileEmbeddingsStore(mixedEmbPath),
+    embedder: testEmbedder,
+    persistCachePath: path.join(testDir, "cache", "c1-cache.json"),
+  });
+  const secondSync = await c1SecondService.syncCorpusAndEmbeddings();
+  assert.equal(secondSync.newChunks, 0, "Uniform matching-model embeddings should hit disk cache with 0 API calls");
+  console.log("  Passed: Mixed/untyped embeddings rejected cleanly and repaired with uniform dimensions.");
+
+  // Test 27 (C2): Live Semantic Cache Isolation from Tests
+  console.log("\nTest 27 (C2): Verifying Live Semantic Cache Was Not Mutated by Tests...");
+  const liveCachePath = path.join(process.cwd(), "data", "cache", "semantic-cache.json");
+  const liveCacheRaw = await fs.readFile(liveCachePath, "utf-8");
+  const liveCacheJson = JSON.parse(liveCacheRaw);
+  assert.notEqual(
+    liveCacheJson.corpusHash,
+    "new_corpus_hash_after_doc_update_v2",
+    "Tests must never overwrite live data/cache/semantic-cache.json"
+  );
+  console.log("  Passed: Live semantic-cache.json remains isolated from test cache mutations.");
+
+  // Test 28 (C3): Block SemanticCache Poisoning When inspect_store_data Runs
+  console.log("\nTest 28 (C3): Testing Store-State Cache Poisoning Guard...");
+  const c3Repo = new StoreRepository(path.join(testDir, "c3-stores"));
+  await c3Repo.saveInitialStore(validStore);
+  const c3Staging = new StagingService(c3Repo);
+  const c3CachePath = path.join(testDir, "cache", "c3-cache.json");
+  const c3Docs = new DocsService({
+    embeddingsStore: new InMemoryEmbeddingsStore(),
+    embedder: testEmbedder,
+    persistCachePath: c3CachePath,
+  });
+  await c3Docs.syncCorpusAndEmbeddings();
+  const c3Logger = new QueryLoggerService(path.join(testDir, "logs", "c3-logs.jsonl"));
+  const c3Agent = new KhadoomAgent(c3Repo, c3Staging, c3Docs, c3Logger, "test-key");
+
+  let mockTurn = 0;
+  (c3Agent as any).openai = {
+    chat: {
+      completions: {
+        create: async () => {
+          mockTurn++;
+          if (mockTurn === 1) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "tc_doc",
+                        type: "function",
+                        function: { name: "search_documentation", arguments: JSON.stringify({ query: "Tabby" }) },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          }
+          if (mockTurn === 2) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "tc_inspect",
+                        type: "function",
+                        function: { name: "inspect_store_data", arguments: JSON.stringify({ path: "/paymentProviders" }) },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          }
+          if (mockTurn === 3) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: "Tabby is currently disabled in your store. You can enable it anytime.",
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          }
+          if (mockTurn === 4) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "tc_doc_only",
+                        type: "function",
+                        function: { name: "search_documentation", arguments: JSON.stringify({ query: "Tabby" }) },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          }
+          return {
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: "Tabby supports SAR and AED split payments.",
+                },
+              },
+            ],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          };
+        },
+      },
+    },
+  };
+
+  const mixedRes = await c3Agent.processUserPrompt(validStore.id, "is tabby active in my store right now");
+  assert.equal(mixedRes.type, "answer");
+  const poisonedCache = await c3Docs.getCachedEntry("is tabby active in my store right now", {
+    currency: validStore.currency,
+    locale: validStore.locale,
+    country: validStore.shippingZones[0].countries[0],
+  });
+  assert.equal(poisonedCache, undefined, "Hybrid inspect+docs turn must NOT be cached into SemanticCache");
+
+  const pureDocsRes = await c3Agent.processUserPrompt(validStore.id, "what currencies does tabby support");
+  assert.equal(pureDocsRes.type, "answer");
+  const pureCached = await c3Docs.getCachedEntry("what currencies does tabby support", {
+    currency: validStore.currency,
+    locale: validStore.locale,
+    country: validStore.shippingZones[0].countries[0],
+  });
+  assert.ok(pureCached, "Pure documentation Q&A turn SHOULD be cached");
+  console.log("  Passed: Hybrid store-inspection answers blocked from cache while pure doc Q&A still caches.");
+
+  // Test 29 (C4): Multi-Item Array Removal & Sequential Patch Compilation
+  console.log("\nTest 29 (C4): Testing Descending Multi-Item Removals & Sequential Patches...");
+  const c4Repo = new StoreRepository(path.join(testDir, "c4-stores"));
+  await c4Repo.saveInitialStore(validStore);
+  const c4Staging = new StagingService(c4Repo);
+
+  const multiRemoveResult = await c4Staging.stageMutation(
+    validStore.id,
+    1,
+    "Remove all Coffee Beans products without deleting brewing gear",
+    [{ op: "remove", path: "/products[categories=Coffee Beans]" }]
+  );
+  assert.equal(multiRemoveResult.success, true);
+  if (multiRemoveResult.success) {
+    assert.equal(multiRemoveResult.session.stagedStore.products.length, 1);
+    assert.equal(
+      multiRemoveResult.session.stagedStore.products[0].id,
+      "prod_003",
+      "Only V60 Ceramic Dripper (prod_003) should remain after deleting both Coffee Beans items"
+    );
+    assert.equal(multiRemoveResult.session.semanticChanges.length, 2);
+    const summaries = multiRemoveResult.session.semanticChanges.map((c) => c.summary).join(" | ");
+    assert.ok(summaries.includes("Colombian Huila") && summaries.includes("Ethiopian Yirgacheffe"));
+  }
+
+  const sequentialResult = await c4Staging.stageMutation(
+    validStore.id,
+    1,
+    "Remove first product then update second product by ID and chain price increment",
+    [
+      { op: "remove", path: "/products[id=prod_001]" },
+      { op: "replace", path: "/products[id=prod_002]/price", value: 100 },
+      { op: "increment", path: "/products[id=prod_002]/price", value: 15 },
+    ]
+  );
+  assert.equal(sequentialResult.success, true);
+  if (sequentialResult.success) {
+    assert.equal(sequentialResult.session.stagedStore.products.length, 2);
+    assert.equal(sequentialResult.session.stagedStore.products[0].id, "prod_002");
+    assert.equal(
+      sequentialResult.session.stagedStore.products[0].price,
+      115,
+      "Sequential patch after index shift must resolve prod_002 cleanly and chain increment (100 -> 115)"
+    );
+    assert.ok(
+      sequentialResult.session.semanticChanges.every((c) => c.summary.includes("Colombian Huila") || c.summary.includes("Ethiopian Yirgacheffe")),
+      "Sequential semantic diffs must reference true entity names after removal shift"
+    );
+  }
+  console.log("  Passed: Multi-item removals and sequential index-shifting patches compiled accurately.");
+
+  // Test 30 (H1): Multi-Line YAML Frontmatter Parsing on doc-shipping-zones.md
+  console.log("\nTest 30 (H1): Testing Multi-Line YAML Frontmatter Tag Parsing...");
+  const shippingChunk = corpus.chunks.find((c) => c.docId === "doc_shipping_zones");
+  assert.ok(shippingChunk, "doc_shipping_zones chunk must exist");
+  assert.equal(
+    shippingChunk?.metadata.tags.length,
+    11,
+    `Expected 11 tags on doc_shipping_zones, got ${shippingChunk?.metadata.tags.length}`
+  );
+  assert.ok(
+    shippingChunk?.metadata.tags.includes("شحن مجاني"),
+    "Arabic tag 'شحن مجاني' must be parsed from multi-line YAML array"
+  );
+  const arabicShippingResults = bm25.search("شحن مجاني");
+  assert.ok(arabicShippingResults.length > 0 && arabicShippingResults[0].chunk.docId === "doc_shipping_zones");
+  console.log("  Passed: All 11 English & Arabic tags loaded from multi-line YAML frontmatter.");
+
+  // Test 31 (H2): Lazy Dense-Vector Hydration Without syncCorpusAndEmbeddings()
+  console.log("\nTest 31 (H2): Testing Lazy Vector Hydration & Empty-Store Embed Skip...");
+  const lazyDocsService = new DocsService({
+    embeddingsStore: new FileEmbeddingsStore(mixedEmbPath),
+    embedder: testEmbedder,
+    persistCachePath: path.join(testDir, "cache", "h2-cache.json"),
+  });
+  const lazyResults = await lazyDocsService.searchDocs("shipping rates Saudi Arabia");
+  assert.ok(lazyResults.length > 0);
+  assert.ok(
+    lazyResults.some((r) => typeof r.vectorSimilarity === "number" && r.vectorSimilarity > 0),
+    "DocsService.searchDocs() must lazily hydrate persisted vectors even without syncCorpusAndEmbeddings()"
+  );
+
+  let embedCallCount = 0;
+  const countingEmptyService = new DocsService({
+    embeddingsStore: new InMemoryEmbeddingsStore(),
+    embedder: async (text: string) => {
+      embedCallCount++;
+      return testEmbedder(text);
+    },
+    persistCachePath: path.join(testDir, "cache", "h2-empty-cache.json"),
+  });
+  await countingEmptyService.searchDocs("shipping zones");
+  assert.equal(embedCallCount, 0, "Should skip paid query embedding call when vector store has 0 vectors");
+  console.log("  Passed: Lazy vector hydration active and empty vector store skips wasted embed call.");
+
+  // Test 32 (H3): TOCTOU Optimistic Concurrency Check on commitSession
+  console.log("\nTest 32 (H3): Testing Commit-Time Optimistic Concurrency Guard...");
+  const h3Repo = new StoreRepository(path.join(testDir, "h3-stores"));
+  await h3Repo.saveInitialStore(validStore);
+  const h3Staging = new StagingService(h3Repo);
+
+  const sessionA = await h3Staging.stageMutation(validStore.id, 1, "Session A theme change", [
+    { op: "replace", path: "/theme/colors/primary", value: "#111111" },
+  ]);
+  const sessionB = await h3Staging.stageMutation(validStore.id, 1, "Session B theme change", [
+    { op: "replace", path: "/theme/colors/primary", value: "#222222" },
+  ]);
+  assert.equal(sessionA.success, true);
+  assert.equal(sessionB.success, true);
+  if (sessionA.success && sessionB.success) {
+    await h3Staging.commitSession(sessionB.session.sessionId);
+    await assert.rejects(
+      async () => {
+        await h3Staging.commitSession(sessionA.session.sessionId);
+      },
+      /CONCURRENCY_CONFLICT/,
+      "Committing stale sessionA after sessionB bumped store to v2 must fail with CONCURRENCY_CONFLICT"
+    );
+    const liveAfterConflict = await h3Repo.getStore(validStore.id);
+    assert.equal(liveAfterConflict?.version, 2);
+    assert.equal(liveAfterConflict?.theme.colors.primary, "#222222");
+  }
+  console.log("  Passed: Commit-time TOCTOU race blocked cleanly without overwriting v2.");
+
+  // Test 33 (H4): Bounded Multi-Turn Session Memory
+  console.log("\nTest 33 (H4): Testing Bounded Multi-Turn Session Memory...");
+  const h4Agent = new KhadoomAgent(h3Repo, h3Staging, countingEmptyService, c3Logger, "test-key");
+  const seenMessagesPerCall: any[][] = [];
+  let h4Call = 0;
+  (h4Agent as any).openai = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          h4Call++;
+          seenMessagesPerCall.push([...params.messages]);
+          if (h4Call === 1) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: "Which coffee product do you mean: Ethiopian Yirgacheffe or Colombian Huila?",
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+            };
+          }
+          return {
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: "Got it — Colombian Huila.",
+                },
+              },
+            ],
+            usage: { prompt_tokens: 15, completion_tokens: 5, total_tokens: 20 },
+          };
+        },
+      },
+    },
+  };
+
+  await h4Agent.processUserPrompt(validStore.id, "change coffee price by 5", {
+    conversationId: "sess_h4",
+  });
+  await h4Agent.processUserPrompt(validStore.id, "Colombian Huila", {
+    conversationId: "sess_h4",
+  });
+  await h4Agent.processUserPrompt(validStore.id, "standalone query", {});
+
+  // Call 2 should contain system + prior user + prior assistant + current user = 4 messages
+  assert.equal(seenMessagesPerCall[1].length, 4);
+  assert.equal(seenMessagesPerCall[1][1].content, "change coffee price by 5");
+  assert.ok(String(seenMessagesPerCall[1][2].content).includes("Colombian Huila"));
+  // Call 3 without conversationId must stay stateless (system + user = 2 messages)
+  assert.equal(seenMessagesPerCall[2].length, 2);
+  console.log("  Passed: Session memory carries compact follow-up context while omitting overhead on stateless calls.");
+
+  // Test 34 (H5): Self-Correction Context Retention, Fast Conflict Fail, & Cumulative Patches
+  console.log("\nTest 34 (H5): Testing Self-Correction Context, Fast Conflict Fail & Cumulative Mutations...");
+  const h5Repo = new StoreRepository(path.join(testDir, "h5-stores"));
+  await h5Repo.saveInitialStore(validStore);
+  const h5Staging = new StagingService(h5Repo);
+  const h5Agent = new KhadoomAgent(h5Repo, h5Staging, countingEmptyService, c3Logger, "test-key");
+
+  // Subtest A & C: Inspect -> invalid negative price -> self-correction sees inspected product JSON -> second sequential propose_store_changes merges cleanly
+  const h5PromptsSeen: any[][] = [];
+  let h5Step = 0;
+  (h5Agent as any).openai = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          h5Step++;
+          h5PromptsSeen.push(params.messages);
+          if (h5Step === 1) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "h5_inspect",
+                        type: "function",
+                        function: { name: "inspect_store_data", arguments: JSON.stringify({ path: "/products" }) },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          }
+          if (h5Step === 2) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "h5_bad_patch",
+                        type: "function",
+                        function: {
+                          name: "propose_store_changes",
+                          arguments: JSON.stringify({
+                            explanation: "Set invalid negative price",
+                            patches: [{ op: "replace", path: "/products[id=prod_002]/price", value: -10 }],
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          }
+          if (h5Step === 3) {
+            // Self-correction call MUST retain inspect_store_data tool output containing Colombian Huila!
+            const flat = JSON.stringify(params.messages);
+            assert.ok(flat.includes("Colombian Huila"), "Self-correction call must keep inspected store JSON");
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "h5_fixed_patch",
+                        type: "function",
+                        function: {
+                          name: "propose_store_changes",
+                          arguments: JSON.stringify({
+                            explanation: "Set Colombian Huila price to 60",
+                            patches: [{ op: "replace", path: "/products[id=prod_002]/price", value: 60 }],
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          }
+          if (h5Step === 4) {
+            // Second propose_store_changes turn in same prompt (must merge instead of clobbering!)
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "h5_second_patch",
+                        type: "function",
+                        function: {
+                          name: "propose_store_changes",
+                          arguments: JSON.stringify({
+                            explanation: "Also enable Tabby",
+                            patches: [{ op: "replace", path: "/paymentProviders[id=tabby]/enabled", value: true }],
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            };
+          }
+          return {
+            choices: [{ message: { role: "assistant", content: "Both price and Tabby staged." } }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          };
+        },
+      },
+    },
+  };
+
+  const h5Result = await h5Agent.processUserPrompt(validStore.id, "Set Colombian Huila to 60 and enable Tabby");
+  assert.equal(h5Result.type, "mutation_staged");
+  assert.equal(h5Result.stagingSession?.stagedStore.products[1].price, 60);
+  assert.equal(h5Result.stagingSession?.stagedStore.paymentProviders.find((p) => p.id === "tabby")?.enabled, true);
+
+  // Subtest B: CONCURRENCY_CONFLICT must fail fast (0 OpenAI retries inside handleMutationWithSelfCorrection)
+  let conflictCallCount = 0;
+  (h5Agent as any).openai = {
+    chat: {
+      completions: {
+        create: async () => {
+          conflictCallCount++;
+          return {
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: "h5_conflict",
+                      type: "function",
+                      function: {
+                        name: "propose_store_changes",
+                        arguments: JSON.stringify({
+                          explanation: "Will fail version check",
+                          patches: [{ op: "replace", path: "/theme/colors/primary", value: "#333333" }],
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          };
+        },
+      },
+    },
+  };
+  const conflictRes = await (h5Agent as any).handleMutationWithSelfCorrection(
+    validStore.id,
+    99,
+    "Stale conflict test",
+    [{ op: "replace", path: "/theme/colors/primary", value: "#333333" }],
+    "change color",
+    validStore,
+    () => {}
+  );
+  assert.equal(conflictRes.type, "error");
+  assert.equal(conflictCallCount, 0, "CONCURRENCY_CONFLICT must not trigger LLM retry calls");
+  console.log("  Passed: Self-correction preserved inspected context, merged sequential mutations, and aborted conflict retries.");
+
   // Clean up test directory again
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 25 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  console.log(" ALL 34 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 

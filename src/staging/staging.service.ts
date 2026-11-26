@@ -149,7 +149,8 @@ export class StagingService {
       session.storeId,
       session.stagedStore,
       session.explanation,
-      session.patches
+      session.patches,
+      session.baseVersion
     );
 
     session.status = "committed";

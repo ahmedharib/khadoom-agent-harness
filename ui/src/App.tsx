@@ -38,6 +38,7 @@ export const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isUpdated, setIsUpdated] = useState<boolean>(false);
   const [activeStoreTab, setActiveStoreTab] = useState<StoreTabType>("products");
+  const [conversationId, setConversationId] = useState<string>(() => `ui_${Date.now()}`);
 
   // Trigger brief visual pulse on store update
   const flashUpdate = () => {
@@ -80,7 +81,7 @@ export const App: React.FC = () => {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt, conversationId }),
       });
 
       if (!res.ok) throw new Error("Agent turn request failed");
@@ -208,7 +209,7 @@ export const App: React.FC = () => {
       const res = await fetch("/api/staging/modify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, feedback }),
+        body: JSON.stringify({ sessionId, feedback, conversationId }),
       });
 
       if (!res.ok) throw new Error("Failed to modify staging session");
@@ -303,7 +304,9 @@ export const App: React.FC = () => {
       const res = await fetch("/api/store/reset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId }),
       });
+      setConversationId(`ui_${Date.now()}`);
 
       if (!res.ok) throw new Error("Reset failed");
       const data = await res.json();

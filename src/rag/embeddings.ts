@@ -29,10 +29,19 @@ export interface ChunkEmbedding {
   chunkId: string;
   hash: string;
   vector: number[];
+  model?: string;
+}
+
+export interface EmbeddingsMetadata {
+  corpusHash?: string;
+  model?: string;
+  dimensions?: number;
 }
 
 export interface PersistedEmbeddingsPayload {
   corpusHash: string;
+  model?: string;
+  dimensions?: number;
   updatedAt: string;
   items: ChunkEmbedding[];
 }
@@ -44,8 +53,13 @@ export interface PersistedEmbeddingsPayload {
  */
 export interface EmbeddingsStore {
   loadEmbeddings(): Promise<Map<string, ChunkEmbedding>>;
-  saveEmbeddings(embeddings: Map<string, ChunkEmbedding>, corpusHash: string): Promise<void>;
+  saveEmbeddings(
+    embeddings: Map<string, ChunkEmbedding>,
+    corpusHash: string,
+    metadata?: { model?: string; dimensions?: number }
+  ): Promise<void>;
   getCorpusHash(): Promise<string | null>;
+  getMetadata?(): Promise<EmbeddingsMetadata | null>;
 }
 
 export class FileEmbeddingsStore implements EmbeddingsStore {
@@ -75,31 +89,44 @@ export class FileEmbeddingsStore implements EmbeddingsStore {
 
   async saveEmbeddings(
     embeddings: Map<string, ChunkEmbedding>,
-    corpusHash: string
+    corpusHash: string,
+    metadata?: { model?: string; dimensions?: number }
   ): Promise<void> {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    const firstItem = embeddings.values().next().value as ChunkEmbedding | undefined;
     const payload: PersistedEmbeddingsPayload = {
       corpusHash,
+      model: metadata?.model ?? firstItem?.model,
+      dimensions: metadata?.dimensions ?? firstItem?.vector?.length,
       updatedAt: new Date().toISOString(),
       items: Array.from(embeddings.values()),
     };
     await fs.writeFile(this.filePath, JSON.stringify(payload, null, 2), "utf-8");
   }
 
-  async getCorpusHash(): Promise<string | null> {
+  async getMetadata(): Promise<EmbeddingsMetadata | null> {
     try {
       const raw = await fs.readFile(this.filePath, "utf-8");
       const parsed: PersistedEmbeddingsPayload = JSON.parse(raw);
-      return parsed.corpusHash || null;
+      return {
+        corpusHash: parsed.corpusHash,
+        model: parsed.model,
+        dimensions: parsed.dimensions,
+      };
     } catch {
       return null;
     }
+  }
+
+  async getCorpusHash(): Promise<string | null> {
+    const meta = await this.getMetadata();
+    return meta?.corpusHash || null;
   }
 }
 
 export class InMemoryEmbeddingsStore implements EmbeddingsStore {
   private map = new Map<string, ChunkEmbedding>();
-  private corpusHash: string | null = null;
+  private metadata: EmbeddingsMetadata = {};
 
   async loadEmbeddings(): Promise<Map<string, ChunkEmbedding>> {
     return new Map(this.map);
@@ -107,14 +134,24 @@ export class InMemoryEmbeddingsStore implements EmbeddingsStore {
 
   async saveEmbeddings(
     embeddings: Map<string, ChunkEmbedding>,
-    corpusHash: string
+    corpusHash: string,
+    metadata?: { model?: string; dimensions?: number }
   ): Promise<void> {
+    const firstItem = embeddings.values().next().value as ChunkEmbedding | undefined;
     this.map = new Map(embeddings);
-    this.corpusHash = corpusHash;
+    this.metadata = {
+      corpusHash,
+      model: metadata?.model ?? firstItem?.model,
+      dimensions: metadata?.dimensions ?? firstItem?.vector?.length,
+    };
+  }
+
+  async getMetadata(): Promise<EmbeddingsMetadata | null> {
+    return this.metadata.corpusHash ? { ...this.metadata } : null;
   }
 
   async getCorpusHash(): Promise<string | null> {
-    return this.corpusHash;
+    return this.metadata.corpusHash || null;
   }
 }
 
@@ -128,13 +165,18 @@ export function normalizeVector(vec: number[]): number[] {
   return vec.map((v) => Number((v / norm).toFixed(6)));
 }
 
+const KNOWN_MODEL_DIMENSIONS: Record<string, number> = {
+  "text-embedding-3-small": 1536,
+  "text-embedding-3-large": 3072,
+  "text-embedding-ada-002": 1536,
+};
+
 export function cosineSimilarity(vecA: number[], vecB: number[]): number {
-  if (vecA.length === 0 || vecB.length === 0) return 0;
-  const len = Math.min(vecA.length, vecB.length);
+  if (vecA.length === 0 || vecB.length === 0 || vecA.length !== vecB.length) return 0;
   let dot = 0;
   let normA = 0;
   let normB = 0;
-  for (let i = 0; i < len; i++) {
+  for (let i = 0; i < vecA.length; i++) {
     dot += vecA[i] * vecB[i];
     normA += vecA[i] * vecA[i];
     normB += vecB[i] * vecB[i];
@@ -171,6 +213,8 @@ export class EmbeddingsService {
   private model: string;
   private customEmbedder?: (text: string) => Promise<number[]>;
   private memoryCache: Map<string, ChunkEmbedding> = new Map();
+  private isHydrated = false;
+  private hydrationPromise: Promise<void> | null = null;
 
   constructor(options: EmbeddingsServiceOptions = {}) {
     this.store = options.store || new FileEmbeddingsStore();
@@ -207,40 +251,113 @@ export class EmbeddingsService {
     ].join(" \n ");
   }
 
+  public getEffectiveModelId(): string {
+    return this.customEmbedder ? `custom:${this.model}` : this.model;
+  }
+
+  public getExpectedDimensions(): number | undefined {
+    return this.customEmbedder ? undefined : KNOWN_MODEL_DIMENSIONS[this.model];
+  }
+
   async syncCorpusEmbeddings(
     chunks: DocChunk[],
     corpusHash: string
   ): Promise<SyncEmbeddingsResult> {
     const persisted = await this.store.loadEmbeddings();
+    const storeMeta = (await this.store.getMetadata?.()) ?? null;
+    const expectedModel = this.getEffectiveModelId();
+    let expectedDim = this.getExpectedDimensions();
+
+    // Only treat persisted embeddings as valid for the current model if metadata matches.
+    // Untyped legacy files (model === undefined) or model switches trigger re-embedding.
+    const persistedModelMatches = storeMeta?.model === expectedModel;
+    if (!expectedDim && persistedModelMatches && storeMeta?.dimensions && storeMeta.dimensions > 0) {
+      expectedDim = storeMeta.dimensions;
+    }
+
     const updatedMap = new Map<string, ChunkEmbedding>();
-    let changed = false;
+    let changed = persisted.size !== chunks.length || !persistedModelMatches;
     let cachedChunks = 0;
     let newChunks = 0;
 
     for (const chunk of chunks) {
-      const existing = persisted.get(chunk.chunkId) || this.memoryCache.get(chunk.chunkId);
-      if (existing && existing.hash === chunk.hash && existing.vector.length > 0) {
-        updatedMap.set(chunk.chunkId, existing);
+      const memCandidate = this.memoryCache.get(chunk.chunkId);
+      const diskCandidate = persistedModelMatches ? persisted.get(chunk.chunkId) : undefined;
+      const existing = memCandidate ?? diskCandidate;
+
+      const isDimensionValid =
+        existing !== undefined &&
+        existing.vector.length > 0 &&
+        (expectedDim === undefined || existing.vector.length === expectedDim);
+      const isModelValid =
+        existing !== undefined && (!existing.model || existing.model === expectedModel);
+
+      if (existing && existing.hash === chunk.hash && isDimensionValid && isModelValid) {
+        if (expectedDim === undefined) {
+          expectedDim = existing.vector.length;
+        }
+        updatedMap.set(chunk.chunkId, {
+          chunkId: existing.chunkId,
+          hash: existing.hash,
+          vector: existing.vector,
+          model: existing.model ?? expectedModel,
+        });
         cachedChunks++;
       } else {
         const inputText = this.buildChunkEmbeddingInput(chunk);
         const vector = await this.embedText(inputText);
+        if (expectedDim === undefined) {
+          expectedDim = vector.length;
+        } else if (vector.length !== expectedDim) {
+          throw new Error(
+            `Embedder returned inconsistent vector dimensions (${vector.length} vs expected ${expectedDim}).`
+          );
+        }
         updatedMap.set(chunk.chunkId, {
           chunkId: chunk.chunkId,
           hash: chunk.hash,
           vector,
+          model: expectedModel,
         });
         newChunks++;
         changed = true;
       }
     }
 
+    // Reconcile dimensionality across any chunks cached before expectedDim was learned
+    if (expectedDim !== undefined) {
+      for (const [chunkId, item] of updatedMap.entries()) {
+        if (item.vector.length !== expectedDim) {
+          const chunk = chunks.find((c) => c.chunkId === chunkId)!;
+          const vector = await this.embedText(this.buildChunkEmbeddingInput(chunk));
+          updatedMap.set(chunkId, {
+            chunkId,
+            hash: chunk.hash,
+            vector,
+            model: expectedModel,
+          });
+          cachedChunks--;
+          newChunks++;
+          changed = true;
+        }
+      }
+    }
+
     const storedCorpusHash = await this.store.getCorpusHash();
-    if (changed || storedCorpusHash !== corpusHash) {
-      await this.store.saveEmbeddings(updatedMap, corpusHash);
+    if (
+      changed ||
+      storedCorpusHash !== corpusHash ||
+      storeMeta?.model !== expectedModel ||
+      storeMeta?.dimensions !== expectedDim
+    ) {
+      await this.store.saveEmbeddings(updatedMap, corpusHash, {
+        model: expectedModel,
+        dimensions: expectedDim,
+      });
     }
 
     this.memoryCache = updatedMap;
+    this.isHydrated = true;
     return {
       embeddings: updatedMap,
       totalChunks: chunks.length,
@@ -248,6 +365,58 @@ export class EmbeddingsService {
       newChunks,
       corpusHash,
     };
+  }
+
+  /**
+   * Lazily hydrates `memoryCache` from persisted store on first read so callers using
+   * `searchDocs()` without calling `syncCorpusAndEmbeddings()` still perform dense vector search.
+   */
+  async ensureLoaded(): Promise<void> {
+    if (this.isHydrated || this.memoryCache.size > 0) {
+      this.isHydrated = true;
+      return;
+    }
+    if (this.hydrationPromise) {
+      return this.hydrationPromise;
+    }
+
+    this.hydrationPromise = (async () => {
+      try {
+        const persisted = await this.store.loadEmbeddings();
+        if (persisted.size === 0) return;
+
+        const storeMeta = (await this.store.getMetadata?.()) ?? null;
+        const expectedModel = this.getEffectiveModelId();
+        if (storeMeta?.model !== expectedModel) {
+          return;
+        }
+
+        const expectedDim = this.getExpectedDimensions() ?? storeMeta?.dimensions;
+        const hydrated = new Map<string, ChunkEmbedding>();
+        let discoveredDim = expectedDim;
+
+        for (const [chunkId, item] of persisted.entries()) {
+          if (!item.vector || item.vector.length === 0) continue;
+          if (discoveredDim === undefined) {
+            discoveredDim = item.vector.length;
+          }
+          if (item.vector.length !== discoveredDim) continue;
+          if (item.model && item.model !== expectedModel) continue;
+          hydrated.set(chunkId, item);
+        }
+
+        this.memoryCache = hydrated;
+      } finally {
+        this.isHydrated = true;
+        this.hydrationPromise = null;
+      }
+    })();
+
+    return this.hydrationPromise;
+  }
+
+  public getCachedVectorCount(): number {
+    return this.memoryCache.size;
   }
 
   searchVectors(

@@ -30,6 +30,7 @@ async function main() {
   const agent = new KhadoomAgent(repository, stagingService, docsService, queryLogger);
 
   const storeId = SEED_STORE.id;
+  const cliConversationId = `cli_${Date.now()}`;
 
   // Initialize store if not already present
   let store = await repository.getStore(storeId);
@@ -48,6 +49,7 @@ async function main() {
   console.log(" - '/history'  : View version snapshot changelog");
   console.log(" - '/rollback <v>' : Roll back live store to version <v>");
   console.log(" - '/store'    : Print current store status");
+  console.log(" - '/clear'    : Clear conversation memory");
   console.log(" - '/exit'     : Quit\n");
 
   while (true) {
@@ -58,6 +60,12 @@ async function main() {
     if (trimmed === "/exit") {
       console.log("Exiting Khadoom AI. Goodbye!");
       break;
+    }
+
+    if (trimmed === "/clear") {
+      agent.clearConversation(cliConversationId);
+      console.log("[Memory] Conversation history cleared.");
+      continue;
     }
 
     if (trimmed === "/store") {
@@ -107,7 +115,9 @@ async function main() {
     }
 
     console.log("[Khadoom AI] Thinking...");
-    const response = await agent.processUserPrompt(storeId, trimmed);
+    const response = await agent.processUserPrompt(storeId, trimmed, {
+      conversationId: cliConversationId,
+    });
 
     if (response.type === "answer") {
       console.log(`\nKhadoom: ${response.message}`);
@@ -178,11 +188,18 @@ async function main() {
         } else if (normalized === "M" || normalized === "MODIFY") {
           const feedback = await rl.question("What would you like to modify in these changes? > ");
           console.log("[Khadoom AI] Adjusting changes based on your feedback...");
-          stagingService.rejectSession(session.sessionId);
-          const adjusted = await agent.processUserPrompt(
-            storeId,
-            `Modify previous proposal (${session.explanation}): ${feedback}`
-          );
+          const modifyPrompt = `Modify previous staged proposal "${session.explanation}" (previous patches: ${JSON.stringify(
+            session.patches
+          )}; previous summary: ${session.semanticChanges
+            .map((c) => c.summary)
+            .join("; ")}) with this merchant feedback, preserving any unchanged parts of the proposal: ${feedback}`;
+
+          const adjusted = await agent.processUserPrompt(storeId, modifyPrompt, {
+            conversationId: cliConversationId,
+          });
+          if (adjusted.type !== "error") {
+            stagingService.rejectSession(session.sessionId);
+          }
           currentResponse = adjusted;
 
           if (adjusted.type !== "mutation_staged") {

@@ -1,7 +1,27 @@
+import jsonpatch, { type Operation } from "fast-json-patch";
 import { JsonPatchOperation } from "../schema/patch.schema.js";
+
+const applyPatch = jsonpatch.applyPatch;
 
 const PREDICATE_REGEX = /^([a-zA-Z0-9_-]+)\[([a-zA-Z0-9_-]+)=([^\]]+)\]$/;
 const WILDCARD_REGEX = /^([a-zA-Z0-9_-]+)\[\*\]$/;
+
+function comparePathsDescending(pathA: string, pathB: string): number {
+  const segsA = pathA.split("/").filter(Boolean);
+  const segsB = pathB.split("/").filter(Boolean);
+  const minLen = Math.min(segsA.length, segsB.length);
+  for (let i = 0; i < minLen; i++) {
+    if (segsA[i] !== segsB[i]) {
+      const aIsNum = /^\d+$/.test(segsA[i]);
+      const bIsNum = /^\d+$/.test(segsB[i]);
+      if (aIsNum && bIsNum) {
+        return Number(segsB[i]) - Number(segsA[i]);
+      }
+      return segsB[i].localeCompare(segsA[i]);
+    }
+  }
+  return segsB.length - segsA.length;
+}
 
 export function getValueAtPath(obj: any, path: string): any {
   const parts = path.split("/").filter(Boolean);
@@ -119,86 +139,66 @@ export function compilePredicatePath(store: any, path: string): string {
  *    against current store values and converts them to standard 'replace' ops.
  * 4. Automatically clamps prices and inventory reductions to >= 0.
  */
+const ARITHMETIC_OPS = new Set(["increment", "decrement", "percentage", "multiply"]);
+
+function computeArithmeticValue(op: string, currentVal: any, targetPath: string, rawOperand: any): number {
+  if (typeof currentVal !== "number") {
+    throw new Error(
+      `Cannot apply '${op}' to non-numeric value at '${targetPath}' (current value: ${JSON.stringify(currentVal)})`
+    );
+  }
+  const operand = Number(rawOperand);
+  let rawResult: number;
+  if (op === "increment") {
+    rawResult = currentVal + operand;
+  } else if (op === "decrement") {
+    rawResult = currentVal - operand;
+  } else if (op === "percentage") {
+    rawResult = currentVal * (1 + operand / 100);
+  } else {
+    rawResult = currentVal * operand;
+  }
+  return Math.max(0, Number(rawResult.toFixed(2)));
+}
+
 export function compilePredicatePatches(
   store: any,
   patches: JsonPatchOperation[]
 ): JsonPatchOperation[] {
   const compiled: JsonPatchOperation[] = [];
+  // Advance a working clone step-by-step so sequential patches and multi-item
+  // removals never read stale indices or pre-batch values (C4).
+  const workingStore = JSON.parse(JSON.stringify(store));
 
   for (const patch of patches) {
-    const targetPaths = expandSemanticPath(store, patch.path);
+    const expandedPaths = expandSemanticPath(workingStore, patch.path);
 
-    if (targetPaths.length === 0) {
+    if (expandedPaths.length === 0) {
       throw new Error(`Path '${patch.path}' did not match any targets in the store.`);
     }
 
+    const targetPaths =
+      patch.op === "remove" && expandedPaths.length > 1
+        ? [...expandedPaths].sort(comparePathsDescending)
+        : expandedPaths;
+
     for (const targetPath of targetPaths) {
-      const currentVal = getValueAtPath(store, targetPath);
+      const currentVal = getValueAtPath(workingStore, targetPath);
+      const compiledOp: JsonPatchOperation = ARITHMETIC_OPS.has(patch.op)
+        ? {
+            op: "replace",
+            path: targetPath,
+            value: computeArithmeticValue(patch.op, currentVal, targetPath, patch.value),
+          }
+        : {
+            op: patch.op,
+            path: targetPath,
+            value: patch.value,
+            from: patch.from ? compilePredicatePath(workingStore, patch.from) : undefined,
+          };
 
-      // 1. Arithmetic: Increment (+= delta)
-      if (patch.op === "increment") {
-        if (typeof currentVal !== "number") {
-          throw new Error(
-            `Cannot increment non-numeric value at '${targetPath}' (current value: ${JSON.stringify(currentVal)})`
-          );
-        }
-        const delta = Number(patch.value);
-        let newVal = Number((currentVal + delta).toFixed(2));
-        newVal = Math.max(0, newVal); // Clamp non-negative
-        compiled.push({ op: "replace", path: targetPath, value: newVal });
-        continue;
-      }
-
-      // 2. Arithmetic: Decrement (-= delta)
-      if (patch.op === "decrement") {
-        if (typeof currentVal !== "number") {
-          throw new Error(
-            `Cannot decrement non-numeric value at '${targetPath}' (current value: ${JSON.stringify(currentVal)})`
-          );
-        }
-        const delta = Number(patch.value);
-        let newVal = Number((currentVal - delta).toFixed(2));
-        newVal = Math.max(0, newVal); // Clamp non-negative
-        compiled.push({ op: "replace", path: targetPath, value: newVal });
-        continue;
-      }
-
-      // 3. Arithmetic: Percentage (+- X%)
-      if (patch.op === "percentage") {
-        if (typeof currentVal !== "number") {
-          throw new Error(
-            `Cannot apply percentage to non-numeric value at '${targetPath}' (current value: ${JSON.stringify(currentVal)})`
-          );
-        }
-        const pct = Number(patch.value);
-        const factor = 1 + pct / 100;
-        let newVal = Number((currentVal * factor).toFixed(2));
-        newVal = Math.max(0, newVal); // Clamp non-negative
-        compiled.push({ op: "replace", path: targetPath, value: newVal });
-        continue;
-      }
-
-      // 4. Arithmetic: Multiply (*= factor)
-      if (patch.op === "multiply") {
-        if (typeof currentVal !== "number") {
-          throw new Error(
-            `Cannot multiply non-numeric value at '${targetPath}' (current value: ${JSON.stringify(currentVal)})`
-          );
-        }
-        const factor = Number(patch.value);
-        let newVal = Number((currentVal * factor).toFixed(2));
-        newVal = Math.max(0, newVal); // Clamp non-negative
-        compiled.push({ op: "replace", path: targetPath, value: newVal });
-        continue;
-      }
-
-      // 5. Standard RFC 6902 operation
-      compiled.push({
-        op: patch.op,
-        path: targetPath,
-        value: patch.value,
-        from: patch.from ? compilePredicatePath(store, patch.from) : undefined,
-      });
+      applyPatch(workingStore, [compiledOp as Operation], true, true);
+      compiled.push(compiledOp);
     }
   }
 
