@@ -10,91 +10,20 @@ Instead of letting an LLM rewrite entire store configurations (which causes hall
 
 ### Part I: Store Mutation & Staging Engine
 
-#### 1. RFC 6902 JSON Patching & Predicate-Based Paths
-- Rather than rewriting the entire store JSON, the LLM outputs atomic RFC 6902 JSON Patches (`add`, `replace`, `remove`).
-- **Predicate Path Resolution**: Solves the positional array problem. The agent targets entities naturally by ID (e.g., `/paymentProviders[id=cod]/enabled` or `/products[id=prod_001]/price`) without guessing array indices. The backend compiler resolves these to exact numeric indices at runtime.
+- **RFC 6902 Patching, Predicates, Arithmetic & Wildcards**: Instead of rewriting full store JSON, the LLM emits atomic patches (`add`, `replace`, `remove`) with runtime predicate path resolution (`/products[id=prod_001]/price`), relative arithmetic (`increment`, `decrement`, `percentage`, `multiply` with automatic `>= 0` clamping), and bulk wildcards (`/products[*]/price`).
+- **Strict Validation & Self-Correction**: Mutations apply to an in-memory clone validated against [`MtajirStoreSchema`](src/schema/store.schema.ts) (hex colors, SKUs, inventory integers, currencies, shipping zones). Validation errors feed exact Zod issue paths back into an automated retry loop (up to 3 retries), paired with a mandatory read-before-write rule (`inspect_store_data`) so IDs are never guessed.
+- **Reversible Staging, Semantic Diffs & No-Op Guard**: Validated patches enter an isolated `pending` staging session guarded by optimistic concurrency (`baseVersion === liveVersion`), translated into human-readable feature diff cards, and checked for redundant no-op edits.
+- **HITL Flow & High-Water Mark Versioning**: Merchants review **Proposal Cards** (Web UI) or CLI prompts to **[A]ccept**, **[R]eject**, or **[M]odify**. Accepted commits write immutable snapshots (`v1.json`, `v2.json`, ...) and `changelog.json`. Rolling back (`v2` → `v1`) and committing again advances to `v3`, never overwriting historical snapshots.
 
-#### 2. Relative Arithmetic Operations & Wildcard Bulk Updates
-- Native support for relative arithmetic operations:
-  - `increment` (`+= delta`)
-  - `decrement` (`-= delta`)
-  - `percentage` (`+/- X%`)
-  - `multiply` (`*= factor`)
-- **Automatic Non-Negative Clamping**: Prices and inventory levels are automatically clamped at `0` to prevent invalid states.
-- **Wildcard Expansion**: Target arrays in bulk with single operations (e.g., `/products[*]/price` to apply store-wide price adjustments or collection-wide updates).
+### Part II: Grounded Retrieval, Caching & Routing (RAG)
 
-#### 3. Strict Runtime Zod Schema Validation
-- All store mutations are applied to an in-memory clone and strictly validated against [`MtajirStoreSchema`](src/schema/store.schema.ts).
-- Validates hex colors (`#RRGGBB` or `#RGB`), nested navigation trees, product SKUs, inventory integers, currency codes (`SAR`, `AED`, `KWD`, etc.), and shipping zones.
-
-#### 4. Self-Correction Retry Loop
-- If schema validation fails, the exact Zod error paths and failure reasons are fed back to the model in an automated retry loop (up to 3 retries).
-- The agent corrects syntax, schema types, or invalid paths before changes ever reach the merchant.
-
-#### 5. Mandatory Read-Before-Write Rule
-- The agent is instructed never to guess entity IDs, SKU codes, or rates.
-- Before mutating existing catalog products, shipping rates, or navigation items, the agent must inspect the live store slice via `inspect_store_data` to obtain verified identifiers.
-
-#### 6. Reversible In-Memory Staging Layer
-- Validated changes enter an isolated `pending` staging session without touching the live store.
-- **Optimistic Concurrency Guard**: Staging checks `baseVersion === liveVersion`. If another admin or process updated the store concurrently, mutation is blocked with a concurrency conflict.
-
-#### 7. Semantic Feature Diffing & No-Op Detection
-- Translates raw RFC 6902 patches into human-friendly feature change cards (e.g., *"Changed primary theme color from '#1E293B' to '#2563EB'"*).
-- **No-Op Prevention**: Redundant edits (such as setting an already active color or price) are detected and discarded without advancing the version counter.
-
-#### 8. Human-in-the-Loop (HITL) Interactive Flow
-- Merchants review proposed changes visually via interactive **Proposal Cards** in the Web UI or via terminal prompts in the CLI with three explicit choices:
-  - **[A]ccept**: Commits staged changes to the live store and increments snapshot version.
-  - **[R]eject**: Discards staged changes completely, leaving the live store untouched.
-  - **[M]odify**: Provides feedback to iteratively adjust and re-stage proposed changes.
-
-#### 9. High-Water Mark Versioning & Deterministic Rollback
-- Every accepted commit generates an immutable snapshot (`v1.json`, `v2.json`, ...) and appends to `changelog.json`.
-- **High-Water Mark Versioning**: When rolling back to an earlier version (e.g., from `v2` back to `v1`) and subsequently committing new changes, the version advances to `v3` (strictly incrementing past the highest recorded version), ensuring historical snapshots are never overwritten.
-- **Safe Rollback Guidance**: The agent instructs users to perform rollbacks via deterministic commands (`/rollback <version>` in the CLI or 1-click rollback in the Web UI Version History dropdown) instead of generating reverse AI patches.
-
----
-
-### Part II: Grounded Retrieval & Semantic Caching (RAG)
-
-#### 10. Entity-Linked Hybrid RAG Engine (Qdrant VectorDB + BM25 + RRF + Reranker)
-- Combines lexical keyword precision, VectorDB ANN search, and cross-encoder reranking:
-  - **Vector Database (Qdrant)**: [`QdrantEmbeddingsStore`](src/rag/qdrant-store.ts) stores per-profile collections (`khadoom_docs_openai` 1,536-dim and `khadoom_docs_qwen` 1,024-dim) with native cosine ANN search and payload constraint filter pushdown; falls back seamlessly to disk JSON (`FileEmbeddingsStore`) when Qdrant is offline.
-  - **Dual Embedding Profiles**: Supports OpenAI `text-embedding-3-small` (`1536`-dim) and self-hosted `Qwen/Qwen3-Embedding-0.6B` (`1024`-dim) in separate stores to prevent dimension collisions.
-  - **Bilingual Lexical BM25**: Okapi BM25 indexer ($k_1 = 1.5, b = 0.75$) with field boosting across titles, section headers, entities, and tags.
-  - **Reciprocal Rank Fusion (RRF)**: Merges lexical and vector search ranks using $RRF(d) = \sum \frac{1}{k + rank(d)}$ ($k = 60$).
-  - **Cross-Encoder Reranker**: Optional stage-3 reranking in [`reranker.ts`](src/rag/reranker.ts) supporting **Local (`BAAI/bge-reranker-v2-m3`)** or **Commercial (Cohere `rerank-v3.5`)**, usable by either model pair with graceful RRF fallback.
-  - **Clickable Source Passages & Answer Highlighting**: [`citation-highlighter.ts`](src/rag/citation-highlighter.ts) scores retrieved sentences against the generated answer so UI citation pills expand to show exact passages with used excerpts highlighted.
-  - **Deterministic MD5 Chunk Caching**: Chunks are hashed on content; re-indexing skips unchanged chunks, making embedding runs fast and virtually free.
-
-#### 11. Bilingual Arabic & English Text Normalization & Clitic Stemming
-- Built-in bilingual text normalizer in [`bm25-search.ts`](src/rag/bm25-search.ts):
-  - Strips Arabic diacritics/tashkeel (`[\u064B-\u065F\u0670]`) and tatweel (`\u0640`).
-  - Unifies Alef variants (`أ/إ/آ/ٱ` $\to$ `ا`), Taa Marbuta (`ة` $\to$ `ه`), and Alef Maqsura (`ى` $\to$ `ي`).
-  - Strips attached Arabic prefixes and clitics (`وال`, `بال`, `كال`, `فال`, `لل`, `ال`, `ل`, `ب`) so queries like `بالتقسيط لتابي` match root terms `تقسيط` and `تابي`.
-  - Light English stemmer handles plurals and suffixes (`-ing`, `-ed`, `-es`, `-ies`, `-s`).
-  - Preserves exact e-commerce domain acronyms (`COD`, `BNPL`, `SKU`, `ZATCA`, `CR`, `SAR`).
-
-#### 12. Persistent Multi-Tier Semantic Cache
-- High-speed query response cache delivering $< 5\text{ms}$ latency at **$0 LLM cost** for repeated or paraphrased questions:
-  - **Disk Persistence**: Saved to `data/cache/semantic-cache.json` so cache entries survive server, CLI, and process restarts.
-  - **Tier 1 (Exact Canonical Match)**: Case, punctuation, and whitespace-normalized query match (zero latency, zero API calls).
-  - **Tier 2 (Lexically-Guarded Semantic Match)**: Uses `tokenizeToWordForms` content-word verification combined with a calibrated cosine similarity threshold ($\ge 0.90$). Safely captures genuine paraphrases while strictly blocking dangerous near-miss collisions (such as antonyms "enable Tabby" vs "disable Tabby", or "primary" vs "secondary" color).
-  - **Compound Context Key**: Partitioned by `corpusHash::currency::country::locale`. Prevents cross-store cache pollution so Saudi merchants don't receive Kuwaiti-specific answers.
-  - **Corpus Hash Invalidation**: Automatically flushes stale cached answers whenever Markdown documentation files are updated.
-
-#### 13. Scope Boundaries & Anti-Hallucination Guardrails
-- **Domain Specialization**: The agent is explicitly scoped to Mtajir e-commerce platform features and merchant store management.
-- **Irrelevant Retrieval Protection**: Out-of-scope inquiries (e.g. general software engineering, external AI/RAG system architecture, personal questions) are politely declined. The agent is explicitly forbidden from force-fitting unrelated store docs (such as Tabby installments or store snapshots) into synthetic answers.
-- **Attribution & Source Filtering**: If documentation retrieved during hybrid search is non-pertinent to the query, source citations are pruned, and false-positive Q&A is never cached.
-
-#### 14. Per-Model Telemetry, Self-Hosted Serving & Provider Router
-- **Provider & RAG Router ([`provider-router.ts`](src/routing/provider-router.ts))**: Live-probes endpoints and switches cleanly between:
-  - **Commercial Pair**: OpenAI (`gpt-4o-mini` + `text-embedding-3-small`)
-  - **Local / Open-Weight Pair**: Self-hosted **Qwen 3** (`Qwen/Qwen3-8B-FP8` via vLLM + `Qwen/Qwen3-Embedding-0.6B`) using [`notebooks/khadoom_qwen3_colab_vllm.ipynb`](notebooks/khadoom_qwen3_colab_vllm.ipynb), with safe tool-call JSON recovery and `<think>` block stripping.
-  - **Cross-Pair Reranker**: Either pair can independently select `Off (RRF Only)`, `Local (BAAI/bge-reranker-v2-m3)`, or `Commercial (Cohere rerank-v3.5)`. Inactive options appear greyed out and disabled in the UI header pill.
-- **Benchmarking Telemetry ([`query-logger.ts`](src/telemetry/query-logger.ts))**: Tracks uncached/cached prompt tokens, completion tokens, `p50`/`p95` latency, `tokensPerSecond`, `msPerOutputToken`, JSON parse recoveries, semantic cache hits, exact API USD cost, amortized GPU runtime cost (`LLM_HOURLY_COST_USD`), and `byModel` breakdowns in append-only JSONL logs (`data/logs/query-logs.jsonl`).
+- **Hybrid RAG Pipeline (Qdrant + BM25 + RRF + Reranker)**:
+  - **VectorDB & Dual Profiles**: [`QdrantEmbeddingsStore`](src/rag/qdrant-store.ts) maintains separate collections (`khadoom_docs_openai` 1,536-dim and `khadoom_docs_qwen` 1,024-dim) with cosine ANN search and payload constraint pushdown, falling back seamlessly to `FileEmbeddingsStore` JSON when Qdrant is offline. MD5 chunk hashing skips unchanged sections on `npm run embed`.
+  - **Bilingual Lexical BM25 & RRF**: [`bm25-search.ts`](src/rag/bm25-search.ts) runs Okapi BM25 ($k_1=1.5, b=0.75$) with Arabic normalization (diacritics, Alef/Taa Marbuta/Alef Maqsura, clitic prefixes `وال`/`بال`/`لل`/`ال`/`ب`/`ل`), English suffix stemming, and acronym protection (`COD`, `BNPL`, `SKU`, `ZATCA`, `SAR`), fused with vector ranks via RRF ($k=60$).
+  - **Cross-Encoder Reranking & Passage Highlighting**: [`reranker.ts`](src/rag/reranker.ts) supports optional stage-3 reranking via **Local (`BAAI/bge-reranker-v2-m3`)** or **Commercial (`Cohere rerank-v3.5`)** with RRF fallback. [`citation-highlighter.ts`](src/rag/citation-highlighter.ts) maps answer sentences back to retrieved excerpts for expandable UI highlights.
+- **Persistent Multi-Tier Semantic Cache**: Stored in `data/cache/semantic-cache.json` (`< 5ms`, $0 LLM cost), partitioned by `corpusHash::currency::country::locale`. Tier 1 handles normalized exact matches; Tier 2 uses `tokenizeToWordForms` + cosine similarity ($\ge 0.90$) to capture paraphrases while blocking antonym/entity collisions. Updates to `data/docs/` automatically invalidate stale entries.
+- **Scope Guardrails**: Off-topic queries are declined without force-fitting store docs; non-pertinent retrieved chunks are pruned from citations and excluded from caching.
+- **Provider Router & Per-Model Telemetry**: [`provider-router.ts`](src/routing/provider-router.ts) live-probes and switches between **Commercial** (`gpt-4o-mini` + `text-embedding-3-small`) and **Local** (`Qwen/Qwen3-8B-FP8` via vLLM + `Qwen/Qwen3-Embedding-0.6B` from [`notebooks/khadoom_qwen3_colab_vllm.ipynb`](notebooks/khadoom_qwen3_colab_vllm.ipynb), with `<think>` stripping and JSON recovery), plus cross-pair reranker selection. [`query-logger.ts`](src/telemetry/query-logger.ts) logs prompt/cached/completion tokens, `p50`/`p95` latency, `tok/s`, parse recoveries, and API/GPU cost to `data/logs/query-logs.jsonl`.
 
 ---
 
@@ -128,95 +57,27 @@ In production, Khadoom AI cleanly separates **Shared Platform Knowledge** from *
 ```
 khadoom-agent-harness/
 ├── data/
-│   ├── cache/                     # Persisted Tier 2 semantic query cache
-│   │   └── semantic-cache.json
-│   ├── docs/                      # Markdown documentation corpus with YAML frontmatter
-│   │   ├── doc-payment-knet.md
-│   │   ├── doc-payment-providers.md
-│   │   ├── doc-payment-tabby.md
-│   │   ├── doc-products-inventory.md
-│   │   ├── doc-shipping-zones.md
-│   │   ├── doc-theme-customization.md
-│   │   └── doc-version-rollback.md
-│   ├── embeddings/                # Persisted per-profile chunk embeddings & MD5 hashes
-│   │   ├── doc-embeddings.json    # Commercial OpenAI vectors (1536-dim)
-│   │   └── doc-embeddings-qwen.json # Local Qwen3 vectors (1024-dim)
-│   ├── logs/                      # Append-only query telemetry & cost logs
-│   │   └── query-logs.jsonl
+│   ├── cache/semantic-cache.json  # Persisted Tier 1/2 semantic query cache
+│   ├── docs/                      # 7 Markdown guides with YAML frontmatter
+│   ├── embeddings/                # Per-profile embeddings (OpenAI 1536d, Qwen 1024d)
+│   ├── logs/query-logs.jsonl      # Append-only query telemetry & cost logs
 │   └── stores/                    # Live store JSONs, snapshots & changelogs
-│       ├── store_darb_001.json
-│       └── store_darb_001/
-│           ├── changelog.json
-│           └── snapshots/
-│               └── v1.json
-├── docs/
-│   └── RAG_IMPLEMENTATION_SPEC.md # Full RAG engine specification & architecture
-├── evals/                         # Bilingual RAG retrieval & Ragas evaluation suite
-│   ├── rag_eval_dataset.json      # 18 English/Arabic test cases + constraint/hallucination traps
-│   ├── run_rag_retrieval_eval.ts  # Benchmarks BM25, VectorDB, Hybrid RRF, & Reranked pipelines
-│   ├── score_with_ragas.py        # Computes Faithfulness, Relevancy, Precision, Recall & Correctness
-│   ├── requirements-evals.txt     # Python dependencies for Ragas scoring
-│   └── README.md
-├── notebooks/
-│   └── khadoom_qwen3_colab_vllm.ipynb # Colab L4 vLLM (Qwen3) + Embeddings & BGE-M3 Reranker sidecar
+├── docs/RAG_IMPLEMENTATION_SPEC.md
+├── evals/                         # Bilingual RAG dataset, retrieval benchmark & Ragas scorer
+├── notebooks/                     # Colab L4 vLLM (Qwen3) + Embeddings & BGE-M3 sidecar
 ├── src/
-│   ├── index.ts                   # Public library exports
-│   ├── server.ts                  # HTTP REST API & static SPA server (Port 3005)
-│   ├── agent/
-│   │   └── khadoom.agent.ts       # Tool calling, self-correction, OpenAI/vLLM compatibility & memory
-│   ├── data/
-│   │   └── seed-store.ts          # Seed store dataset ('Darb Roastery')
-│   ├── diff/
-│   │   └── semantic-diff.ts       # Translates JSON patches into merchant feature cards
-│   ├── patch/
-│   │   └── patch-compiler.ts      # Predicate path compiler & arithmetic operator engine
-│   ├── rag/
-│   │   ├── bm25-search.ts         # Okapi BM25 engine with Arabic & English normalizer
-│   │   ├── citation-highlighter.ts # Extracts & highlights answer-aligned source excerpts
-│   │   ├── constraint-filter.ts   # Currency & country hard filter
-│   │   ├── doc-loader.ts          # Markdown frontmatter parser & section chunker
-│   │   ├── docs.service.ts        # Unified documentation & hybrid retrieval facade
-│   │   ├── embeddings.ts          # EmbeddingsStore adapter & dual-profile vector service
-│   │   ├── hybrid-search.ts       # RRF fusion + cross-encoder reranking pipeline
-│   │   ├── qdrant-store.ts        # Qdrant VectorDB client with ANN query & payload filtering
-│   │   ├── reranker.ts            # Local (BGE-M3) & Commercial (Cohere) reranker service
-│   │   ├── semantic-cache.ts      # Context-scoped Tier 2 semantic query cache
-│   │   └── sync-embeddings.ts     # CLI script to sync OpenAI/Qwen embeddings & Qdrant
-│   ├── routing/
-│   │   └── provider-router.ts     # Probes & routes Commercial vs Local pairs + Rerankers
-│   ├── schema/
-│   │   ├── patch.schema.ts        # RFC 6902 + arithmetic JSON patch schema
-│   │   └── store.schema.ts        # Complete Mtajir store schema (Zod)
-│   ├── staging/
-│   │   └── staging.service.ts     # In-memory staging, validation & concurrency checks
-│   ├── storage/
-│   │   └── store.repository.ts    # Snapshots, changelog & high-water mark rollback
-│   ├── telemetry/
-│   │   └── query-logger.ts        # Per-model speed/latency/cost tracking & JSONL logger
-│   └── cli.ts                     # Merchant interactive CLI
-├── ui/                            # Modern React 18 + Vite Web Dashboard SPA
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── ChatPane.tsx       # Chat UI, live steps, metrics toggle & clickable citations
-│   │   │   ├── FormattedMessage.tsx # Markdown renderer
-│   │   │   ├── Header.tsx         # Router selector pill, store version, active model & reset
-│   │   │   ├── KhadoomIcon.tsx    # Branded icon components
-│   │   │   ├── LoadingIndicator.tsx # Animated agent thinking indicators
-│   │   │   ├── ProposalCard.tsx   # Interactive HITL staging cards (Accept/Reject/Modify)
-│   │   │   └── StorePane.tsx      # Tabbed live store visualizer & version history
-│   │   ├── App.tsx                # Main dual-pane application layout & state
-│   │   ├── index.css              # Mtajir dark-first styling tokens
-│   │   ├── main.tsx               # React DOM entry point
-│   │   └── types.ts               # Shared TypeScript frontend contracts
-│   ├── dist/                      # Built static SPA assets served by server.ts (`npm run ui:build`)
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── vite.config.ts
-├── test/
-│   └── index.test.ts              # Complete 43-stage automated test suite
+│   ├── index.ts & server.ts       # Library exports + HTTP/SSE API & static SPA server (3005)
+│   ├── cli.ts                     # Interactive terminal CLI
+│   ├── agent/khadoom.agent.ts     # Tool calling, live step streaming, self-correction & memory
+│   ├── diff/ & patch/             # Semantic diff cards, predicate paths & arithmetic compiler
+│   ├── rag/                       # BM25, Qdrant/File embeddings, RRF, reranker, cache & citations
+│   ├── routing/provider-router.ts # Commercial vs Local pair & cross-pair reranker router
+│   ├── schema/, staging/, storage/# Zod schemas, reversible staging & high-water snapshots
+│   └── telemetry/query-logger.ts  # Speed, latency & cost logger
+├── ui/                            # React 18 + Vite Web Dashboard (ChatPane, StorePane, Header, ProposalCard)
+├── test/index.test.ts             # 43-stage automated test suite
 ├── docker-compose.yml             # Local Qdrant VectorDB service (Ports 6333/6334)
-├── package.json
-└── tsconfig.json
+└── package.json
 ```
 
 ---
@@ -318,77 +179,30 @@ npm start
 
 ---
 
-## Ongoing Maintenance & Upkeep Guide
+## Operations & RAG Playbook
 
-| Maintenance Task | Procedure & CLI Command | Impact & Operational Behavior |
+| Task | Command / Procedure | Behavior |
 | :--- | :--- | :--- |
-| **Adding or Updating Docs** | Create/edit `.md` files in `data/docs/` with YAML frontmatter and `## ` headers, then run `npm run embed`. | **Incremental & Cost-Optimized**: Only chunks with changed MD5 content hashes call OpenAI API (`text-embedding-3-small` at $0.02 / 1M tokens). Unchanged chunks load from cache at $0. |
-| **Document Deletion / Renaming** | Delete or rename `.md` in `data/docs/`, then run `npm run embed`. To clean orphan chunk embeddings, delete `data/embeddings/doc-embeddings.json` and re-sync. | Synchronizes chunk registry with active files. Ensures deleted features are pruned from search indices. |
-| **Q&A Semantic Cache Invalidation** | **Fully Automatic**: Modifying any document or frontmatter changes the composite `corpusHash`, which automatically invalidates stale cached answers on the next query. | **Zero Maintenance**: Stale answers are automatically evicted. To manually wipe all cached Q&A: `rm data/cache/semantic-cache.json`. |
-| **Semantic Cache Size Housekeeping** | Inspect `data/cache/semantic-cache.json`. In high-traffic deployments, purge or archive when entries exceed storage limits (e.g. >10,000 entries). | Survives server restarts. Purging only resets warm hits back to normal RAG retrieval without data loss. |
-| **Embedding Model / Dimension Upgrades** | When upgrading embedding models (e.g. from `text-embedding-3-small` to `text-embedding-3-large`), delete `data/embeddings/doc-embeddings.json` and re-run `npm run embed`. | **One-time re-index**: Vector dimension mismatches throw if not regenerated cleanly. |
-| **Vector DB Cloud Migration** | Swap `FileEmbeddingsStore` with a database adapter (`pgvector`, `sqlite-vec`, `Qdrant`) by implementing the 3-method `EmbeddingsStore` interface in [`embeddings.ts`](src/rag/embeddings.ts). | Enables multi-node cloud deployments with shared concurrent vector search and centralized indexing. |
-| **Arabic Vocabulary & Dialect Tuning** | Add new GCC/MENA e-commerce terms, payment acronyms, or prefixes into [`bm25-search.ts`](src/rag/bm25-search.ts) (`STOPWORDS` or clitic prefix regex). | **Zero API Cost**: Enhances BM25 lexical recall for regional phrasing (e.g. Saudi vs UAE vs Kuwait dialect variants). |
-| **Constraint & Currency Hygiene** | Ensure all country/currency-specific docs define `supportedCurrencies` and `supportedCountries` in their YAML frontmatter. | **Strict Tenant Isolation**: Prevents platform features (e.g. KNet in Kuwait) from leaking into irrelevant merchant regions (e.g. Saudi Arabia). |
-| **Cost & Token Monitoring** | Inspect live badges in the Web Dashboard header, call `GET /api/telemetry`, run `/cost` in the CLI, or view `data/logs/query-logs.jsonl`. | Real-time telemetry monitoring uncached vs cached prompt tokens, average latency, and cumulative USD spend. |
-| **Frontend UI Building** | Run `npm run ui:build` after editing React components in `ui/src/`. | Compiles production SPA assets into `ui/dist/` for static serving via `src/server.ts`. |
-| **Telemetry Log Rotation** | Periodically rotate, compress, or truncate `data/logs/query-logs.jsonl` in production. | Standard append-only log maintenance. |
-| **Continuous Verification** | Run `npm test` after any documentation, schema, UI, or algorithm change. | Executes 43 end-to-end automated verification stages locally. |
-| **RAG Evaluation (Ragas)** | Run `npm run eval:rag` then `python evals/score_with_ragas.py` (see [`evals/README.md`](evals/README.md)). | Benchmarks `bm25_only`, `vectordb_only`, `hybrid_rrf`, and `hybrid_rrf_rerank` across core Ragas metrics. |
+| **Add / Update Docs** | Edit `data/docs/*.md` (YAML frontmatter + `## ` headers), then run `npm run embed`. | MD5 chunk deduplication skips unchanged sections ($0 API cost) and updates `corpusHash`, auto-invalidating stale cache entries. |
+| **Delete Docs / Upgrade Model** | Delete `data/embeddings/doc-embeddings*.json` and run `npm run embed`. | Prunes orphan chunks and prevents vector dimension collisions across models. |
+| **VectorDB (Qdrant)** | Run `docker compose up -d` (local port `6333`) or set `QDRANT_URL` + `QDRANT_API_KEY` in `.env`. | Startup auto-migrates existing file embeddings into `khadoom_docs_openai` / `khadoom_docs_qwen` at zero API cost. |
+| **Reset Semantic Cache** | `rm data/cache/semantic-cache.json` (PowerShell: `Remove-Item data/cache/semantic-cache.json -Force`). | Clears warm Q&A hits; action mutations bypass cache automatically. |
+| **Arabic Dialect & Constraints** | Tune `ARABIC_STOPWORDS` / prefix regex in [`bm25-search.ts`](src/rag/bm25-search.ts); set `supportedCurrencies` / `supportedCountries` in doc frontmatter. | Improves GCC/MENA recall and enforces strict regional doc isolation (e.g., KNet vs SAR). |
+| **Build UI & Verify** | `npm run ui:build` · `npm test` · `npm run eval:rag` (`python evals/score_with_ragas.py`) | Compiles `ui/dist/`, runs the 43-stage test suite, and benchmarks RAG pipelines ([`evals/README.md`](evals/README.md)). |
 
----
-
-### RAG Operational Playbooks
-
-#### 1. Adding or Modifying Documentation
-Every document in `data/docs/*.md` must conform to the structured frontmatter schema:
+**Doc Frontmatter Template (`data/docs/*.md`):**
 ```markdown
 ---
 id: doc_unique_identifier
 title: Human-Readable Guide Title
 category: Payments | Shipping | Catalog | Design & Themes | System
 entities: ["Entity1", "Entity2"]
-supportedCurrencies: ["SAR", "AED"]   # Optional: omit if globally available
-supportedCountries: ["SA", "AE"]       # Optional: omit if globally available
+supportedCurrencies: ["SAR", "AED"]   # Optional: omit if global
+supportedCountries: ["SA", "AE"]       # Optional: omit if global
 tags: ["keyword1", "keyword2"]
 ---
-
-# Title
-Overview text...
-
 ## Section Heading (Creates a chunk boundary)
-Specific instructions, step-by-step guidance, or technical constraints...
 ```
-1. Add or edit the Markdown file in `data/docs/`.
-2. Run the sync command:
-   ```bash
-   npm run embed
-   ```
-3. The engine computes an MD5 hash per chunk. Only modified or new sections trigger an OpenAI embedding request. Unchanged chunks cost zero tokens.
-4. The composite `corpusHash` updates automatically, guaranteeing that any previously cached Q&A referencing stale docs is evicted.
-
-#### 2. Managing the Semantic Cache
-- **Storage Location**: `data/cache/semantic-cache.json` (persisted to disk to survive CLI & server restarts).
-- **Partitioning**: Entries are partitioned by `corpusHash::currency::country::locale`. A change to documentation or a query from a different currency context cannot collide.
-- **Informational Guard**: Only questions matching informational grammar patterns (`isInformationalQuestion`) are cached. Action-oriented store mutations (`"enable cash on delivery"`, `"change banner color"`) always bypass the cache and route to the agent.
-- **Manual Cache Reset**:
-  ```bash
-  rm data/cache/semantic-cache.json
-  # or in PowerShell:
-  Remove-Item data/cache/semantic-cache.json -Force
-  ```
-
-#### 3. Vector Database Setup & Cloud Migration (Qdrant)
-Qdrant is supported out of the box via [`QdrantEmbeddingsStore`](src/rag/qdrant-store.ts):
-1. Start local Qdrant with `docker compose up -d` (uses [`docker-compose.yml`](docker-compose.yml) on port `6333`).
-2. Existing file-backed embeddings (`doc-embeddings.json` / `doc-embeddings-qwen.json`) are automatically migrated into Qdrant collections (`khadoom_docs_openai` / `khadoom_docs_qwen`) on server startup at zero API cost.
-3. For managed Qdrant Cloud or another backend (`pgvector`), set `QDRANT_URL` + `QDRANT_API_KEY` in `.env` or implement the `EmbeddingsStore` interface in [`src/rag/embeddings.ts`](src/rag/embeddings.ts).
-
-#### 4. Lexical Tuning & Regional Dialect Adaptation
-The bilingual BM25 tokenizer in [`src/rag/bm25-search.ts`](src/rag/bm25-search.ts) normalizes Arabic orthography and strips common clitics:
-- When introducing brand names with attached prefixes (e.g. `بتابي`, `لتمارا`, `كمدى`), verify that the prefix rule `^([ووبكفل]+)` properly extracts the stem.
-- Add frequent non-informative query filler terms (e.g. `ممكن`, `لو سمحت`, `طريقة`) to the `ARABIC_STOPWORDS` set to prevent token dilution.
-- Exact e-commerce acronyms (`COD`, `BNPL`, `SKU`, `ZATCA`, `CR`, `SAR`) are protected from stemming and given exact keyword precedence.
 
 ---
 
