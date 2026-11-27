@@ -9,8 +9,10 @@ dist/
 .env.*
 !.env.example
 
-# Runtime demo data & logs
-/data/
+# Runtime demo data & logs (keep data/docs tracked for fresh clones)
+/data/*
+!/data/docs/
+!/data/docs/*.md
 /test-data/
 evals/results/
 
