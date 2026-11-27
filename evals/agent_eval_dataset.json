@@ -1,0 +1,181 @@
+[
+  {
+    "id": "task_01_enable_tabby",
+    "category": "single_mutation",
+    "prompt": "Enable Tabby installments in my store",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/paymentProviders[id=tabby]/enabled", "equals": true }
+    ]
+  },
+  {
+    "id": "task_02_price_increment",
+    "category": "single_mutation",
+    "prompt": "Increase Ethiopian Yirgacheffe price by 10 SAR",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["inspect_store_data", "propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/products[id=prod_001]/price", "equals": 75 }
+    ]
+  },
+  {
+    "id": "task_03_theme_banner",
+    "category": "single_mutation",
+    "prompt": "Change primary theme color to #8B5CF6 and turn on the announcement banner",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/theme/colors/primary", "equalsIgnoreCase": "#8B5CF6" },
+      { "path": "/theme/banner/enabled", "equals": true }
+    ]
+  },
+  {
+    "id": "task_04_shipping_rate",
+    "category": "single_mutation",
+    "prompt": "Update Express Riyadh Same-Day shipping price to 35 SAR",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["inspect_store_data", "propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/shippingZones[id=zone_sa]/rates[id=rate_exp]/price", "equals": 35 }
+    ]
+  },
+  {
+    "id": "task_05_wildcard_discount",
+    "category": "single_mutation",
+    "prompt": "Apply a 10% discount to all products in my catalog",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/products[id=prod_001]/price", "approx": 58.5 },
+      { "path": "/products[id=prod_002]/price", "approx": 52.2 },
+      { "path": "/products[id=prod_003]/price", "approx": 81 }
+    ]
+  },
+  {
+    "id": "task_06_inspect_color",
+    "category": "store_inspection",
+    "prompt": "What is my current primary theme color?",
+    "expectedType": "answer",
+    "expectedTools": ["inspect_store_data"],
+    "expectedAnswerAll": ["#1E293B"]
+  },
+  {
+    "id": "task_07_inspect_inactive_payments",
+    "category": "store_inspection",
+    "prompt": "Which payment providers are currently disabled in my store?",
+    "expectedType": "answer",
+    "expectedTools": ["inspect_store_data"],
+    "expectedAnswerAll": ["Tabby", "Cash on Delivery"]
+  },
+  {
+    "id": "task_08_inspect_most_expensive",
+    "category": "store_inspection",
+    "prompt": "Which product in my store is the most expensive and what is its price?",
+    "expectedType": "answer",
+    "expectedTools": ["inspect_store_data"],
+    "expectedAnswerAll": ["V60", "90"]
+  },
+  {
+    "id": "task_09_compound_color",
+    "category": "compound",
+    "prompt": "What is my secondary color right now, and change my primary color to #0F172A",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["inspect_store_data", "propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/theme/colors/primary", "equalsIgnoreCase": "#0F172A" }
+    ],
+    "expectedAnswerAll": ["#D97706"]
+  },
+  {
+    "id": "task_10_compound_inventory",
+    "category": "compound",
+    "prompt": "What is the current price of Colombian Huila, and increase V60 Ceramic Dripper inventory by 5",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["inspect_store_data", "propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/products[id=prod_003]/inventory", "equals": 20 }
+    ],
+    "expectedAnswerAll": ["58"]
+  },
+  {
+    "id": "task_11_compound_doc_and_mutation",
+    "category": "compound",
+    "prompt": "What currencies does Tabby require, and enable Tabby in my store?",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["search_documentation", "propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/paymentProviders[id=tabby]/enabled", "equals": true }
+    ],
+    "expectedAnswerAll": ["SAR", "AED"]
+  },
+  {
+    "id": "task_12_modify_drop_cod",
+    "category": "modify_proposal",
+    "prompt": "Enable Tabby and Cash on Delivery",
+    "modifyFeedback": "Keep Tabby enabled, do not enable COD",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/paymentProviders[id=tabby]/enabled", "equals": true },
+      { "path": "/paymentProviders[id=cod]/enabled", "equals": false }
+    ]
+  },
+  {
+    "id": "task_13_modify_price_tweak",
+    "category": "modify_proposal",
+    "prompt": "Set Ethiopian Yirgacheffe price to 70 and Colombian Huila price to 50",
+    "modifyFeedback": "Change Colombian Huila to 62 instead",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/products[id=prod_001]/price", "equals": 70 },
+      { "path": "/products[id=prod_002]/price", "equals": 62 }
+    ]
+  },
+  {
+    "id": "task_14_arabic_inspect_products",
+    "category": "arabic",
+    "prompt": "ايش المنتجات الموجودة في متجري؟",
+    "expectedType": "answer",
+    "expectedTools": ["inspect_store_data"],
+    "expectedAnswerAnyCount": {
+      "terms": ["Yirgacheffe", "يورغاتشيف", "Huila", "هويلا", "V60", "65", "58", "90"],
+      "minMatches": 3
+    }
+  },
+  {
+    "id": "task_15_arabic_enable_cod",
+    "category": "arabic",
+    "prompt": "فعل الدفع عند الاستلام في متجري",
+    "expectedType": "mutation_staged",
+    "expectedTools": ["propose_store_changes"],
+    "expectedStateChecks": [
+      { "path": "/paymentProviders[id=cod]/enabled", "equals": true }
+    ]
+  },
+  {
+    "id": "task_16_navigation",
+    "category": "guard_and_nav",
+    "prompt": "Take me to the payment settings page",
+    "expectedType": "navigation",
+    "expectedTools": ["navigate_to_settings_page"],
+    "expectedRouteIncludes": "payment"
+  },
+  {
+    "id": "task_17_noop_guard",
+    "category": "guard_and_nav",
+    "prompt": "Change primary theme color to #1E293B",
+    "expectedType": "answer",
+    "forbiddenTools": [],
+    "expectedNoMutation": true
+  },
+  {
+    "id": "task_18_out_of_scope",
+    "category": "guard_and_nav",
+    "prompt": "Write a Python quicksort algorithm and explain binary trees",
+    "expectedType": "answer",
+    "forbiddenTools": ["propose_store_changes"],
+    "expectedNoCitations": true
+  }
+]

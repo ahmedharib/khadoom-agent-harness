@@ -20,8 +20,9 @@ import {
   calculateCost,
   TokenUsage,
 } from "../src/telemetry/query-logger.js";
-import { compilePredicatePath } from "../src/patch/patch-compiler.js";
+import { compilePredicatePath, getValueAtPath } from "../src/patch/patch-compiler.js";
 import { AgentResponse, AgentStep, KhadoomAgent } from "../src/agent/khadoom.agent.js";
+import { evaluateTaskOutcome, type AgentEvalTask } from "../evals/run_agent_eval.js";
 
 async function runTests() {
   console.log("Starting Khadoom AI Harness Verification Tests...\n");
@@ -1696,11 +1697,143 @@ async function runTests() {
   assert.equal(cacheEvents.length, 2);
   console.log("  Passed: Live AgentStep running/done stream callbacks and cache steps verified.");
 
+  // Test 44: Compound Prompt Mutation Retry Guard (forces propose_store_changes after inspect-only confirm)
+  console.log("\nTest 44: Testing Compound Prompt Mutation Retry Guard...");
+  const guardAgent = new KhadoomAgent(h5Repo, h5Staging, citeDocsService, c3Logger, "test-key");
+  let guardTurn = 0;
+  let guardSawForcedProposal = false;
+  (guardAgent as any).openai = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          guardTurn++;
+          if (guardTurn === 1) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "call_guard_inspect",
+                        type: "function",
+                        function: { name: "inspect_store_data", arguments: JSON.stringify({ path: "/theme/colors" }) },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 50, completion_tokens: 10, total_tokens: 60 },
+            };
+          }
+          if (guardTurn === 2) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: "Your primary color is #1E293B. Would you like me to proceed with changing it to #FFFFFF?",
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 70, completion_tokens: 20, total_tokens: 90 },
+            };
+          }
+          if (guardTurn === 3) {
+            guardSawForcedProposal =
+              typeof params?.tool_choice === "object" &&
+              params?.tool_choice?.function?.name === "propose_store_changes";
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "call_guard_propose",
+                        type: "function",
+                        function: {
+                          name: "propose_store_changes",
+                          arguments: JSON.stringify({
+                            explanation: "Set primary color to #FFFFFF",
+                            patches: [{ op: "replace", path: "/theme/colors/primary", value: "#FFFFFF" }],
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 90, completion_tokens: 25, total_tokens: 115 },
+            };
+          }
+          return {
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: "Your primary color is currently #1E293B. I have staged the change to #FFFFFF.",
+                },
+              },
+            ],
+            usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
+          };
+        },
+      },
+    },
+  };
+  const guardRes = await guardAgent.processUserPrompt(
+    validStore.id,
+    "what is my primary color, also change primary color to white"
+  );
+  assert.equal(guardSawForcedProposal, true);
+  assert.equal(guardRes.type, "mutation_staged");
+  assert.ok(guardRes.stagingSession?.sessionId);
+  assert.ok(guardRes.answerText?.includes("#1E293B"));
+  console.log("  Passed: Compound prompt mutation retry guard forced propose_store_changes and preserved answer.");
+
+  // Test 45: Agent Eval Dataset Paths & Outcome Scorer
+  console.log("\nTest 45: Testing Agent Eval Dataset & Outcome Scorer...");
+  const evalDatasetRaw = await fs.readFile(path.join(process.cwd(), "evals", "agent_eval_dataset.json"), "utf-8");
+  const evalTasks = JSON.parse(evalDatasetRaw) as AgentEvalTask[];
+  assert.equal(evalTasks.length, 18);
+  for (const t of evalTasks) {
+    if (t.expectedStateChecks) {
+      for (const chk of t.expectedStateChecks) {
+        const compiled = compilePredicatePath(SEED_STORE, chk.path);
+        const val = getValueAtPath(SEED_STORE, compiled);
+        assert.notEqual(val, undefined, `Dataset path '${chk.path}' in ${t.id} must resolve on SEED_STORE`);
+      }
+    }
+  }
+  const tabbyTask = evalTasks.find((t) => t.id === "task_01_enable_tabby")!;
+  const h5Live = (await h5Repo.getStore(validStore.id))!;
+  const stagedPass = await h5Staging.stageMutation(validStore.id, h5Live.version, "Enable Tabby", [
+    { op: "replace", path: "/paymentProviders[id=tabby]/enabled", value: true },
+  ]);
+  assert.equal(stagedPass.success, true);
+  const okOutcome = evaluateTaskOutcome(
+    tabbyTask,
+    { type: "mutation_staged", message: "Enabled Tabby", stagingSession: stagedPass.success ? stagedPass.session : undefined },
+    ["propose_store_changes"]
+  );
+  assert.equal(okOutcome.passed, true);
+  const badOutcome = evaluateTaskOutcome(
+    tabbyTask,
+    { type: "answer", message: "Would you like me to proceed?" },
+    ["inspect_store_data"]
+  );
+  assert.equal(badOutcome.passed, false);
+  assert.ok(badOutcome.failureReasons.length >= 2);
+  console.log("  Passed: Agent eval dataset (18 tasks) and deterministic outcome scorer verified.");
+
   // Clean up test directory again
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 43 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  console.log(" ALL 45 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 

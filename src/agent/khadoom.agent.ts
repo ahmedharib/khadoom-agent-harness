@@ -233,6 +233,7 @@ CRITICAL RULES FOR STORE MUTATIONS:
 - Store name is "${store.name}", description is "${store.description || "No description set"}".
 - Store currency is ${store.currency}, locale is ${store.locale}, current store version is v${store.version}.
 - Always provide a clear, concise merchant-facing explanation of what you are changing and why.
+- Never ask for text confirmation before calling 'propose_store_changes' (the interactive Proposal Card IS the confirmation), and NEVER claim changes are staged or updated unless 'propose_store_changes' returned 'staged_successfully'.
 - RESPONSE FORMATTING:
   * Structure responses cleanly with concise paragraphs and bullet points for lists.
   * Use bold markdown (**term**) intentionally for key terms, carrier names, or headers. Avoid wrapping punctuation, symbols, or entire sentences in asterisks.
@@ -263,7 +264,7 @@ COMPOUND INSTRUCTIONS (QUESTIONS + MUTATIONS):
 - When the merchant asks a question AND requests a store change in the same prompt (e.g., "What is my primary color, change price of humus up by 5"):
   * Always inspect ALL necessary store slices first (e.g., inspect '/theme/colors' for the question, AND inspect '/products' to discover the product ID).
   * Do NOT propose mutations with guessed IDs before verifying the entity in the store data.
-  * In your final response, provide a thorough, helpful answer to their question alongside confirming the staged changes.
+  * Always answer ALL questions in the user's prompt in your final text response alongside confirming the staged changes.
 
 ROLLBACK & VERSION REVERSIONS:
 - Version rollbacks are handled deterministically via CLI commands, NOT through AI patches.
@@ -766,6 +767,31 @@ ROLLBACK & VERSION REVERSIONS:
             );
           }
 
+          const looksLikeFalseStageOrConfirm =
+            !forcedMutationRetry &&
+            turns < maxTurns &&
+            !executedTools.includes("propose_store_changes") &&
+            (/\b(?:changes?\s+(?:have been|are)\s+staged|staged\s+the\s+(?:requested\s+)?changes?|would\s+you\s+like\s+me\s+to\s+(?:proceed|apply|stage|update|change)|shall\s+i\s+(?:proceed|apply|stage|update|change))\b/i.test(
+              cleanContent || ""
+            ) ||
+              (executedTools.includes("inspect_store_data") &&
+                /\b(?:change|update|set|increase|decrease|lower|raise|enable|disable|activate|deactivate)\b/i.test(
+                  userPrompt
+                ) &&
+                (!/^\s*(?:where|how|what|why|when)\b/i.test(userPrompt) ||
+                  /\b(?:also|and)\b|,/i.test(userPrompt))));
+
+          if (looksLikeFalseStageOrConfirm) {
+            forcedMutationRetry = true;
+            messages.push({
+              role: "user",
+              content:
+                "You have not called 'propose_store_changes' yet. Do NOT ask for text confirmation or claim changes are staged without calling the tool. Call 'propose_store_changes' now with valid RFC 6902 patches (and also answer any question in the user's original prompt in your final reply).",
+            });
+            nextToolChoice = { type: "function", function: { name: "propose_store_changes" } };
+            continue;
+          }
+
           const isNegativeOrOutOfScope =
             /outside (?:the )?scope|not (?:available|covered|found) in Mtajir|no (?:matching )?documentation/i.test(
               cleanContent || ""
@@ -915,6 +941,11 @@ ROLLBACK & VERSION REVERSIONS:
                     ? "no_op"
                     : "error",
                 message: mutationRes.message,
+                ...(mutationRes.type === "mutation_staged"
+                  ? {
+                      note: "Changes are now staged for the merchant's Proposal Card. In your final reply, confirm the staged changes AND directly answer any questions from the user's original prompt.",
+                    }
+                  : {}),
               }),
             });
           } else if (fnName === "search_documentation") {

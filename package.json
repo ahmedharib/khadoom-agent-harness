@@ -12,6 +12,7 @@
     "test": "tsx test/index.test.ts",
     "embed": "tsx src/rag/sync-embeddings.ts",
     "eval:rag": "tsx evals/run_rag_retrieval_eval.ts",
+    "eval:agent": "tsx evals/run_agent_eval.ts",
     "build": "tsc"
   },
   "type": "module",
