@@ -7,6 +7,7 @@ import {
   RouterState,
   ModelPairId,
   RerankerMode,
+  AgentStep,
   ChatMessage,
   StagingSession,
 } from "./types.js";
@@ -41,6 +42,7 @@ export const App: React.FC = () => {
   const [modelConfig, setModelConfig] = useState<ModelConfigInfo | null>(null);
   const [routerState, setRouterState] = useState<RouterState | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [liveSteps, setLiveSteps] = useState<AgentStep[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isUpdated, setIsUpdated] = useState<boolean>(false);
   const [activeStoreTab, setActiveStoreTab] = useState<StoreTabType>("products");
@@ -72,6 +74,70 @@ export const App: React.FC = () => {
     loadStore();
   }, []);
 
+  const runAgentTurn = async (endpoint: string, payload: Record<string, unknown>) => {
+    setLiveSteps([]);
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({ ...payload, stream: true }),
+      });
+
+      if (!res.ok) throw new Error("Agent turn request failed");
+
+      const contentType = res.headers.get("content-type") || "";
+      if (!contentType.includes("text/event-stream") || !res.body) {
+        return await res.json();
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalData: any = null;
+
+      const handleBlock = (block: string) => {
+        let eventName = "message";
+        const dataLines: string[] = [];
+        for (const line of block.split(/\r?\n/)) {
+          if (line.startsWith("event:")) eventName = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        if (dataLines.length === 0) return;
+        const parsed = JSON.parse(dataLines.join("\n"));
+        if (eventName === "step") {
+          setLiveSteps((prev) =>
+            prev.some((s) => s.id === parsed.id)
+              ? prev.map((s) => (s.id === parsed.id ? parsed : s))
+              : [...prev, parsed]
+          );
+        } else if (eventName === "done") {
+          finalData = parsed;
+        } else if (eventName === "error") {
+          throw new Error(parsed.error || "Agent turn request failed");
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split(/\r?\n\r?\n/);
+        buffer = blocks.pop() || "";
+        for (const block of blocks) {
+          if (block.trim()) handleBlock(block);
+        }
+      }
+      if (buffer.trim()) handleBlock(buffer);
+      if (!finalData) throw new Error("Stream ended without a final response");
+      return finalData;
+    } finally {
+      setLiveSteps([]);
+    }
+  };
+
   // Send message to Khadoom
   const handleSendMessage = async (prompt: string) => {
     const userMsgId = `msg_${Date.now()}`;
@@ -86,14 +152,7 @@ export const App: React.FC = () => {
     setIsLoading(true);
 
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, conversationId }),
-      });
-
-      if (!res.ok) throw new Error("Agent turn request failed");
-      const data = await res.json();
+      const data = await runAgentTurn("/api/chat", { prompt, conversationId });
 
       const staged: StagingSession | undefined = data.stagingSession || data.stagedMutation;
       const bubbleContent =
@@ -110,6 +169,8 @@ export const App: React.FC = () => {
         citationDetails: data.citationDetails || [],
         stagedMutation: staged,
         navigationRoute: data.navigationRoute,
+        steps: data.steps || [],
+        telemetry: data.turnTelemetry,
         timestamp: new Date().toISOString(),
       };
 
@@ -215,14 +276,11 @@ export const App: React.FC = () => {
   const handleModifyProposal = async (sessionId: string, feedback: string) => {
     setIsLoading(true);
     try {
-      const res = await fetch("/api/staging/modify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, feedback, conversationId }),
+      const data = await runAgentTurn("/api/staging/modify", {
+        sessionId,
+        feedback,
+        conversationId,
       });
-
-      if (!res.ok) throw new Error("Failed to modify staging session");
-      const data = await res.json();
 
       const staged: StagingSession | undefined = data.stagingSession || data.stagedMutation;
 
@@ -255,6 +313,8 @@ export const App: React.FC = () => {
         citations: data.citations || [],
         citationDetails: data.citationDetails || [],
         stagedMutation: staged,
+        steps: data.steps || [],
+        telemetry: data.turnTelemetry,
         timestamp: new Date().toISOString(),
       };
 
@@ -406,6 +466,7 @@ export const App: React.FC = () => {
           onRejectProposal={handleRejectProposal}
           onModifyProposal={handleModifyProposal}
           isLoading={isLoading}
+          liveSteps={liveSteps}
         />
 
         <StorePane

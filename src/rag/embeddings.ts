@@ -235,7 +235,9 @@ export class EmbeddingsService {
     this.customEmbedder = options.embedder;
 
     const baseURL =
-      options.baseURL ?? (process.env.EMBEDDING_BASE_URL || undefined);
+      "baseURL" in options
+        ? options.baseURL || undefined
+        : process.env.EMBEDDING_BASE_URL || undefined;
     const apiKey =
       options.apiKey ||
       process.env.EMBEDDING_API_KEY ||
@@ -255,6 +257,7 @@ export class EmbeddingsService {
     const res = await this.openai.embeddings.create({
       model: this.model,
       input: text,
+      encoding_format: "float",
     });
     const vec = res.data[0]?.embedding;
     if (!vec || vec.length === 0) {

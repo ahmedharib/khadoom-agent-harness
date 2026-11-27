@@ -131,26 +131,79 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    const executeAgentTurn = async (
+      promptText: string,
+      opts: {
+        conversationId?: unknown;
+        requireMutationProposal?: boolean;
+        stream?: unknown;
+        afterTurn?: (turnResult: { type: string }) => void;
+      }
+    ) => {
+      const wantsStream =
+        opts.stream === true || Boolean(req.headers.accept?.includes("text/event-stream"));
+      const convId =
+        typeof opts.conversationId === "string" && opts.conversationId ? opts.conversationId : undefined;
+
+      const writeSse = (event: string, data: unknown) => {
+        if (!res.writableEnded) {
+          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        }
+      };
+
+      if (wantsStream) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          "Access-Control-Allow-Origin": "*",
+        });
+      }
+
+      try {
+        const turnResult = await router.getActiveAgent().processUserPrompt(storeId, promptText, {
+          conversationId: convId,
+          requireMutationProposal: opts.requireMutationProposal,
+          onStep: wantsStream ? (step) => writeSse("step", step) : undefined,
+        });
+        opts.afterTurn?.(turnResult);
+        const currentStore = await repository.getStore(storeId);
+        const changelog = await repository.getChangelog(storeId);
+        const telemetry = await queryLogger.getSummary(storeId);
+        const payload = {
+          ...turnResult,
+          turnTelemetry: turnResult.telemetry,
+          currentStore,
+          changelog,
+          telemetry,
+        };
+        if (wantsStream) {
+          writeSse("done", payload);
+          res.end();
+          return;
+        }
+        return sendJson(res, 200, payload);
+      } catch (err: any) {
+        if (wantsStream) {
+          writeSse("error", { error: err?.message || "Agent turn failed" });
+          res.end();
+          return;
+        }
+        throw err;
+      }
+    };
+
     // 2. POST /api/chat - Send merchant prompt to Khadoom
     if (req.method === "POST" && pathname === "/api/chat") {
       const body = await parseJsonBody(req);
-      const { prompt, conversationId } = body;
+      const { prompt, conversationId, stream } = body;
       if (!prompt || typeof prompt !== "string") {
         return sendJson(res, 400, { error: "prompt is required" });
       }
 
-      const turnResult = await router.getActiveAgent().processUserPrompt(storeId, prompt.trim(), {
-        conversationId: typeof conversationId === "string" && conversationId ? conversationId : undefined,
-      });
-      const currentStore = await repository.getStore(storeId);
-      const changelog = await repository.getChangelog(storeId);
-      const telemetry = await queryLogger.getSummary(storeId);
-
-      return sendJson(res, 200, {
-        ...turnResult,
-        currentStore,
-        changelog,
-        telemetry,
+      return await executeAgentTurn(prompt.trim(), {
+        conversationId,
+        stream,
       });
     }
 
@@ -193,7 +246,7 @@ const server = http.createServer(async (req, res) => {
     // 5. POST /api/staging/modify - Tweak staged mutation with feedback
     if (req.method === "POST" && pathname === "/api/staging/modify") {
       const body = await parseJsonBody(req);
-      const { sessionId, feedback, conversationId } = body;
+      const { sessionId, feedback, conversationId, stream } = body;
       if (!sessionId || !feedback) {
         return sendJson(res, 400, { error: "sessionId and feedback are required" });
       }
@@ -206,22 +259,15 @@ const server = http.createServer(async (req, res) => {
           )}) using this merchant feedback: "${feedback}". Preserve any unchanged parts of the proposal and call 'propose_store_changes' with the complete updated patch list.`
         : feedback;
 
-      const turnResult = await router.getActiveAgent().processUserPrompt(storeId, modifyPrompt, {
-        conversationId: typeof conversationId === "string" && conversationId ? conversationId : undefined,
+      return await executeAgentTurn(modifyPrompt, {
+        conversationId,
         requireMutationProposal: true,
-      });
-      if (turnResult.type === "mutation_staged") {
-        stagingService.rejectSession(sessionId);
-      }
-      const currentStore = await repository.getStore(storeId);
-      const changelog = await repository.getChangelog(storeId);
-      const telemetry = await queryLogger.getSummary(storeId);
-
-      return sendJson(res, 200, {
-        ...turnResult,
-        currentStore,
-        changelog,
-        telemetry,
+        stream,
+        afterTurn: (turnResult) => {
+          if (turnResult.type === "mutation_staged") {
+            stagingService.rejectSession(sessionId);
+          }
+        },
       });
     }
 

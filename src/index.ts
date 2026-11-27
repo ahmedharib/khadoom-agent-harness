@@ -1,5 +1,5 @@
 export { KhadoomAgent } from "./agent/khadoom.agent.js";
-export type { AgentResponse, AgentTelemetry } from "./agent/khadoom.agent.js";
+export type { AgentResponse, AgentTelemetry, AgentStep } from "./agent/khadoom.agent.js";
 
 export {
   MtajirStoreSchema,

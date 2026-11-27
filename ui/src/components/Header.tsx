@@ -477,18 +477,14 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         )}
 
-        {/* 4. Telemetry Token, Speed, Model & Cost Pill (Unified pill) */}
-        {telemetry && (
+        {/* 4. Active Model Pill */}
+        {modelConfig && (
           <div
-            title={`Backend: ${modelConfig ? `${modelConfig.model} (${modelConfig.isCustomEndpoint ? `Custom Endpoint: ${modelConfig.baseURL}` : "OpenAI API"})` : "Unknown"} | Queries: ${telemetry.totalQueries} | Avg: ${telemetry.averageLatencyMs}ms | P95: ${telemetry.p95LatencyMs ?? telemetry.averageLatencyMs}ms | Speed: ${telemetry.avgTokensPerSecond ?? 0} tok/s | Retries: ${telemetry.totalRetries ?? 0}`}
+            title={`Backend: ${modelConfig.model} (${modelConfig.isCustomEndpoint ? `Custom Endpoint: ${modelConfig.baseURL}` : "OpenAI API"})${telemetry ? ` | Queries: ${telemetry.totalQueries}` : ""}`}
             style={infoPillStyle}
           >
             <Activity size={13} color="var(--accent-lavender)" />
-            <span>
-              {modelConfig ? `${modelConfig.model.split("/").pop()} • ` : ""}
-              ${telemetry.totalCostUsd.toFixed(4)} USD
-              {telemetry.avgTokensPerSecond ? ` • ${telemetry.avgTokensPerSecond} tok/s` : ""}
-            </span>
+            <span>{modelConfig.model.split("/").pop()}</span>
           </div>
         )}
 

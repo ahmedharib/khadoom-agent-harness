@@ -30,6 +30,15 @@ export interface AgentTelemetry {
   model: string;
 }
 
+export interface AgentStep {
+  id: string;
+  label: string;
+  toolName?: string;
+  detail?: string;
+  status: "running" | "done" | "error";
+  durationMs?: number;
+}
+
 export interface AgentResponse {
   type: "answer" | "mutation_staged" | "navigation" | "error";
   message: string;
@@ -40,6 +49,7 @@ export interface AgentResponse {
   citationDetails?: CitationDetail[];
   retryCount?: number;
   telemetry?: AgentTelemetry;
+  steps?: AgentStep[];
 }
 
 export interface ProcessPromptOptions {
@@ -47,6 +57,7 @@ export interface ProcessPromptOptions {
   maxHistoryTurns?: number;
   /** When modifying an existing staged proposal, require `propose_store_changes` instead of a plain-text reply. */
   requireMutationProposal?: boolean;
+  onStep?: (step: AgentStep) => void;
 }
 
 interface CompactTurnMessage {
@@ -118,7 +129,9 @@ export class KhadoomAgent {
     config: KhadoomAgentConfig = {}
   ) {
     const resolvedBaseURL =
-      config.baseURL ?? (process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || undefined);
+      "baseURL" in config
+        ? config.baseURL || undefined
+        : process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || undefined;
     const resolvedModel = config.model || model || process.env.LLM_MODEL || "gpt-4o-mini";
     const resolvedApiKey =
       config.apiKey ||
@@ -417,6 +430,37 @@ ROLLBACK & VERSION REVERSIONS:
     let jsonParseErrorsCount = 0;
     let semanticCacheHit = false;
     const providerType: ProviderMode = this.baseURL ? "custom_endpoint" : "openai_api";
+    const steps: AgentStep[] = [];
+    let stepSeq = 0;
+
+    const emitStep = (step: AgentStep) => {
+      options?.onStep?.({ ...step });
+    };
+
+    const startStep = (label: string, toolName?: string, detail?: string): AgentStep => {
+      const step: AgentStep = {
+        id: `step_${++stepSeq}`,
+        label,
+        ...(toolName ? { toolName } : {}),
+        ...(detail ? { detail } : {}),
+        status: "running",
+      };
+      steps.push(step);
+      emitStep(step);
+      return step;
+    };
+
+    const finishStep = (
+      step: AgentStep,
+      startedAt: number,
+      status: "done" | "error" = "done",
+      detail?: string
+    ) => {
+      step.status = status;
+      step.durationMs = Math.max(0, Date.now() - startedAt);
+      if (detail !== undefined) step.detail = detail;
+      emitStep(step);
+    };
 
     const addUsage = (usage?: OpenAI.Completions.CompletionUsage | null) => {
       if (usage) {
@@ -505,6 +549,7 @@ ROLLBACK & VERSION REVERSIONS:
       return {
         ...res,
         telemetry,
+        steps,
       };
     };
 
@@ -540,6 +585,8 @@ ROLLBACK & VERSION REVERSIONS:
         : await this.docsService.getCachedEntry(userPrompt, storeConstraints);
     if (cachedEntry) {
       semanticCacheHit = true;
+      const cacheStep = startStep("Matched semantic cache", "semantic_cache");
+      finishStep(cacheStep, Date.now(), "done");
       return await finalize(
         {
           type: "answer",
@@ -611,6 +658,11 @@ ROLLBACK & VERSION REVERSIONS:
         const toolChoiceForTurn = nextToolChoice;
         nextToolChoice = "auto";
 
+        const llmStepStart = Date.now();
+        const llmStep = startStep(
+          turns === 1 ? "Analyzing request & planning" : `Synthesizing step ${turns}`,
+          "llm"
+        );
         const { completion: response, llmElapsedMs } = await this.createChatCompletion(
           messages,
           toolChoiceForTurn
@@ -622,6 +674,14 @@ ROLLBACK & VERSION REVERSIONS:
         const choice = response.choices[0];
         const message = choice.message;
         const cleanContent = message.content ? stripThinkingBlocks(message.content) : null;
+        finishStep(
+          llmStep,
+          llmStepStart,
+          "done",
+          message.tool_calls && message.tool_calls.length > 0
+            ? `${message.tool_calls.length} tool call(s)`
+            : "Finalizing response"
+        );
         messages.push(message);
 
         // If no tool calls, model gave its final conversational reply
@@ -769,6 +829,9 @@ ROLLBACK & VERSION REVERSIONS:
           const parsedArgs = parseToolArguments(toolCall.function.arguments);
           if (!parsedArgs.ok) {
             jsonParseErrorsCount++;
+            const errStepStart = Date.now();
+            const errStep = startStep(`Invalid arguments for ${fnName}`, fnName, parsedArgs.error);
+            finishStep(errStep, errStepStart, "error");
             messages.push({
               role: "tool",
               tool_call_id: toolCall.id,
@@ -799,6 +862,13 @@ ROLLBACK & VERSION REVERSIONS:
                 ? [...cumulativeExplanations, explanationText].filter(Boolean).join("; ")
                 : explanationText;
 
+            const toolStepStart = Date.now();
+            const toolStep = startStep(
+              "Staging & validating store changes",
+              fnName,
+              explanationText ? explanationText.slice(0, 90) : undefined
+            );
+
             // Snapshot transcript prior to the current tool-call assistant turn so retries keep
             // all earlier `inspect_store_data` and `search_documentation` context (H5).
             const priorContext = messages.slice(0, -1);
@@ -817,6 +887,12 @@ ROLLBACK & VERSION REVERSIONS:
               () => {
                 jsonParseErrorsCount++;
               }
+            );
+            finishStep(
+              toolStep,
+              toolStepStart,
+              mutationRes.type === "error" ? "error" : "done",
+              mutationRes.retryCount ? `Self-corrected (${mutationRes.retryCount}x)` : undefined
             );
 
             if (mutationRes.type === "mutation_staged" && mutationRes.stagingSession) {
@@ -842,10 +918,17 @@ ROLLBACK & VERSION REVERSIONS:
               }),
             });
           } else if (fnName === "search_documentation") {
+            const toolStepStart = Date.now();
+            const toolStep = startStep(
+              "Searching Mtajir documentation",
+              fnName,
+              typeof args.query === "string" ? args.query : undefined
+            );
             const results = await this.docsService.searchDocsAsync(args.query, {
               ...storeConstraints,
               limit: 5,
             });
+            finishStep(toolStep, toolStepStart, "done", `${results.length} passage(s)`);
             results.forEach((r) => {
               if (!citations.includes(r.title)) citations.push(r.title);
               if (!retrievedDocChunks.some((c) => c.chunkId === r.chunkId)) {
@@ -863,7 +946,10 @@ ROLLBACK & VERSION REVERSIONS:
             });
           } else if (fnName === "inspect_store_data") {
             const slicePath = args.path || "/";
+            const toolStepStart = Date.now();
+            const toolStep = startStep("Inspecting store data", fnName, slicePath);
             const dataSlice = slicePath === "/" ? store : this.getValueAtPath(store, slicePath);
+            finishStep(toolStep, toolStepStart, "done");
 
             messages.push({
               role: "tool",
@@ -871,13 +957,19 @@ ROLLBACK & VERSION REVERSIONS:
               content: JSON.stringify(dataSlice ?? "Not found", null, 2),
             });
           } else if (fnName === "navigate_to_settings_page") {
+            const toolStepStart = Date.now();
+            const toolStep = startStep("Preparing settings navigation", fnName, args.route);
             activeNavigation = { route: args.route, reason: args.reason };
+            finishStep(toolStep, toolStepStart, "done");
             messages.push({
               role: "tool",
               tool_call_id: toolCall.id,
               content: `Navigated merchant to ${args.route}.`,
             });
           } else {
+            const toolStepStart = Date.now();
+            const toolStep = startStep(`Running ${fnName}`, fnName);
+            finishStep(toolStep, toolStepStart, "done");
             messages.push({
               role: "tool",
               tool_call_id: toolCall.id,
@@ -945,6 +1037,12 @@ ROLLBACK & VERSION REVERSIONS:
         executedTools
       );
     } catch (err: any) {
+      for (const s of steps) {
+        if (s.status === "running") {
+          s.status = "error";
+          emitStep(s);
+        }
+      }
       return await finalize(
         {
           type: "error",

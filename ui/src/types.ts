@@ -213,6 +213,35 @@ export interface CitationDetail {
   passages: CitationPassage[];
 }
 
+export interface AgentStep {
+  id: string;
+  label: string;
+  toolName?: string;
+  detail?: string;
+  status: "running" | "done" | "error";
+  durationMs?: number;
+}
+
+export interface AgentTurnTelemetry {
+  model: string;
+  providerType?: string;
+  latencyMs: number;
+  llmLatencyMs?: number;
+  llmCallsCount?: number;
+  tokensPerSecond?: number;
+  msPerOutputToken?: number;
+  executedTools?: string[];
+  semanticCacheHit: boolean;
+  usage: {
+    promptTokens: number;
+    cachedTokens: number;
+    completionTokens: number;
+  };
+  cost: {
+    totalCostUsd: number;
+  };
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -221,5 +250,7 @@ export interface ChatMessage {
   citationDetails?: CitationDetail[];
   stagedMutation?: StagingSession;
   navigationRoute?: string;
+  steps?: AgentStep[];
+  telemetry?: AgentTurnTelemetry;
   timestamp: string;
 }

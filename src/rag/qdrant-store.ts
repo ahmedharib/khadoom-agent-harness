@@ -40,7 +40,7 @@ export class QdrantEmbeddingsStore implements EmbeddingsStore {
     this.client = new QdrantClient({
       url: this.url,
       apiKey: config.apiKey || process.env.QDRANT_API_KEY || undefined,
-      timeout: config.timeoutMs ?? 5000,
+      timeout: config.timeoutMs ?? 30_000,
     });
   }
 

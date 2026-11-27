@@ -109,7 +109,7 @@ export class DocsService {
 
     this.embeddingsService = new EmbeddingsService({
       store,
-      baseURL: config.embeddingBaseURL,
+      ...("embeddingBaseURL" in config ? { baseURL: config.embeddingBaseURL } : {}),
       apiKey: config.embeddingApiKey,
       model: config.embeddingModel,
       embedder: config.embedder,

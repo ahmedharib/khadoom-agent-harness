@@ -1,10 +1,20 @@
 import React, { useState, useRef, useEffect } from "react";
-import { ChatMessage } from "../types.js";
+import { AgentStep, ChatMessage } from "../types.js";
 import { ProposalCard } from "./ProposalCard.js";
 import { KhadoomIcon } from "./KhadoomIcon.js";
 import { FormattedMessage } from "./FormattedMessage.js";
 import { PulsatingDots, TextShimmer } from "./LoadingIndicator.js";
-import { Send, User, BookOpen, ChevronDown, ChevronUp, Highlighter } from "lucide-react";
+import {
+  Send,
+  User,
+  BookOpen,
+  ChevronDown,
+  ChevronUp,
+  ChevronRight,
+  Highlighter,
+  CheckCircle2,
+  AlertCircle,
+} from "lucide-react";
 
 function renderHighlightedPassage(content: string, matchedExcerpts: string[]): React.ReactNode {
   if (!matchedExcerpts || matchedExcerpts.length === 0) {
@@ -73,6 +83,7 @@ interface ChatPaneProps {
   onRejectProposal: (sessionId: string) => Promise<void>;
   onModifyProposal: (sessionId: string, feedback: string) => Promise<void>;
   isLoading: boolean;
+  liveSteps?: AgentStep[];
 }
 
 const STARTER_PROMPTS = [
@@ -90,17 +101,19 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   onRejectProposal,
   onModifyProposal,
   isLoading,
+  liveSteps = [],
 }) => {
   const [inputText, setInputText] = useState("");
   const [expandedCitation, setExpandedCitation] = useState<{
     msgId: string;
     title: string;
   } | null>(null);
+  const [expandedSteps, setExpandedSteps] = useState<Record<string, boolean>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
+  }, [messages, isLoading, liveSteps]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -265,6 +278,194 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
             )}
 
             <div style={{ flex: 1 }}>
+              {msg.role === "assistant" &&
+                ((msg.steps && msg.steps.length > 0) || msg.telemetry) && (() => {
+                  const isStepsOpen = Boolean(expandedSteps[msg.id]);
+                  const stepCount = msg.steps?.length || 0;
+                  return (
+                    <div style={{ marginBottom: "6px" }}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedSteps((prev) => ({
+                            ...prev,
+                            [msg.id]: !prev[msg.id],
+                          }))
+                        }
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "5px",
+                          background: "transparent",
+                          border: "none",
+                          padding: "2px 4px",
+                          color: "var(--text-muted)",
+                          opacity: isStepsOpen ? 0.92 : 0.65,
+                          fontSize: "12px",
+                          cursor: "pointer",
+                          transition: "opacity 0.15s ease",
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.opacity = "0.95";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.opacity = isStepsOpen ? "0.92" : "0.65";
+                        }}
+                      >
+                        {isStepsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                        <span>
+                          Show steps and metrics
+                          {stepCount > 0 ? ` (${stepCount})` : ""}
+                        </span>
+                      </button>
+
+                      {isStepsOpen && (
+                        <div
+                          style={{
+                            marginTop: "6px",
+                            padding: "10px 12px",
+                            borderRadius: "10px",
+                            backgroundColor: "rgba(255, 255, 255, 0.025)",
+                            border: "1px solid var(--border-subtle)",
+                            fontSize: "12px",
+                            color: "var(--text-secondary)",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "8px",
+                          }}
+                        >
+                          {msg.steps && msg.steps.length > 0 && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+                              {msg.steps.map((step, idx) => (
+                                <div
+                                  key={step.id || idx}
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "space-between",
+                                    gap: "10px",
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: "7px",
+                                      minWidth: 0,
+                                    }}
+                                  >
+                                    {step.status === "error" ? (
+                                      <AlertCircle size={13} color="#f87171" style={{ flexShrink: 0 }} />
+                                    ) : (
+                                      <CheckCircle2
+                                        size={13}
+                                        color="var(--accent-lavender)"
+                                        style={{ flexShrink: 0 }}
+                                      />
+                                    )}
+                                    <span style={{ color: "var(--text-white)" }}>{step.label}</span>
+                                    {step.detail && (
+                                      <span
+                                        style={{
+                                          color: "var(--text-muted)",
+                                          fontSize: "11px",
+                                          overflow: "hidden",
+                                          textOverflow: "ellipsis",
+                                          whiteSpace: "nowrap",
+                                          maxWidth: "260px",
+                                        }}
+                                        title={step.detail}
+                                      >
+                                        · {step.detail}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {typeof step.durationMs === "number" && (
+                                    <span
+                                      style={{
+                                        color: "var(--text-muted)",
+                                        fontSize: "11px",
+                                        flexShrink: 0,
+                                        fontVariantNumeric: "tabular-nums",
+                                      }}
+                                    >
+                                      {step.durationMs}ms
+                                    </span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {msg.telemetry && (
+                            <div
+                              style={{
+                                paddingTop: msg.steps && msg.steps.length > 0 ? "8px" : 0,
+                                borderTop:
+                                  msg.steps && msg.steps.length > 0
+                                    ? "1px solid rgba(255, 255, 255, 0.06)"
+                                    : "none",
+                                display: "flex",
+                                flexWrap: "wrap",
+                                gap: "12px",
+                                fontSize: "11.5px",
+                                color: "var(--text-muted)",
+                              }}
+                            >
+                              <span>
+                                Latency:{" "}
+                                <strong style={{ color: "var(--text-white)", fontWeight: 500 }}>
+                                  {msg.telemetry.latencyMs}ms
+                                </strong>
+                                {typeof msg.telemetry.llmLatencyMs === "number" &&
+                                msg.telemetry.llmLatencyMs > 0
+                                  ? ` (LLM ${msg.telemetry.llmLatencyMs}ms${
+                                      typeof msg.telemetry.llmCallsCount === "number" &&
+                                      msg.telemetry.llmCallsCount > 0
+                                        ? `, ${msg.telemetry.llmCallsCount} call${
+                                            msg.telemetry.llmCallsCount > 1 ? "s" : ""
+                                          }`
+                                        : ""
+                                    })`
+                                  : ""}
+                                {typeof msg.telemetry.tokensPerSecond === "number" &&
+                                msg.telemetry.tokensPerSecond > 0
+                                  ? ` · ${msg.telemetry.tokensPerSecond} tok/s`
+                                  : ""}
+                              </span>
+                              <span>
+                                Tokens:{" "}
+                                <strong style={{ color: "var(--text-white)", fontWeight: 500 }}>
+                                  {msg.telemetry.usage.promptTokens.toLocaleString()}
+                                </strong>{" "}
+                                in
+                                {msg.telemetry.usage.cachedTokens > 0
+                                  ? ` (${msg.telemetry.usage.cachedTokens.toLocaleString()} cached)`
+                                  : ""}{" "}
+                                /{" "}
+                                <strong style={{ color: "var(--text-white)", fontWeight: 500 }}>
+                                  {msg.telemetry.usage.completionTokens.toLocaleString()}
+                                </strong>{" "}
+                                out
+                              </span>
+                              <span>
+                                Est. Cost:{" "}
+                                <strong style={{ color: "var(--text-white)", fontWeight: 500 }}>
+                                  ${msg.telemetry.cost.totalCostUsd.toFixed(6)}
+                                </strong>
+                              </span>
+                              <span>Model: {msg.telemetry.model}</span>
+                              {msg.telemetry.semanticCacheHit && (
+                                <span style={{ color: "var(--accent-lavender)" }}>Cache Hit</span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
               {/* Message Bubble */}
               <div
                 style={{
@@ -608,12 +809,84 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
                 borderRadius: "16px 16px 16px 4px",
                 padding: "11px 16px",
                 display: "flex",
-                alignItems: "center",
-                gap: "10px",
+                flexDirection: "column",
+                gap: "7px",
+                minWidth: "260px",
+                maxWidth: "460px",
               }}
             >
-              <PulsatingDots />
-              <TextShimmer>Thinking...</TextShimmer>
+              {liveSteps.length === 0 ? (
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <PulsatingDots />
+                  <TextShimmer>Analyzing request...</TextShimmer>
+                </div>
+              ) : (
+                liveSteps.map((step) => (
+                  <div
+                    key={step.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "10px",
+                      fontSize: "12.5px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        minWidth: 0,
+                      }}
+                    >
+                      {step.status === "running" ? (
+                        <PulsatingDots />
+                      ) : step.status === "error" ? (
+                        <AlertCircle size={13} color="#f87171" style={{ flexShrink: 0 }} />
+                      ) : (
+                        <CheckCircle2
+                          size={13}
+                          color="var(--accent-lavender)"
+                          style={{ flexShrink: 0 }}
+                        />
+                      )}
+                      {step.status === "running" ? (
+                        <TextShimmer>{step.label}</TextShimmer>
+                      ) : (
+                        <span style={{ color: "var(--text-secondary)" }}>{step.label}</span>
+                      )}
+                      {step.detail && (
+                        <span
+                          style={{
+                            color: "var(--text-muted)",
+                            fontSize: "11px",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            maxWidth: "180px",
+                          }}
+                          title={step.detail}
+                        >
+                          {step.detail}
+                        </span>
+                      )}
+                    </div>
+                    {typeof step.durationMs === "number" && (
+                      <span
+                        style={{
+                          color: "var(--text-muted)",
+                          fontSize: "11px",
+                          flexShrink: 0,
+                          fontVariantNumeric: "tabular-nums",
+                        }}
+                      >
+                        {step.durationMs}ms
+                      </span>
+                    )}
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}

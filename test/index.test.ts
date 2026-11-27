@@ -21,7 +21,7 @@ import {
   TokenUsage,
 } from "../src/telemetry/query-logger.js";
 import { compilePredicatePath } from "../src/patch/patch-compiler.js";
-import { AgentResponse, KhadoomAgent } from "../src/agent/khadoom.agent.js";
+import { AgentResponse, AgentStep, KhadoomAgent } from "../src/agent/khadoom.agent.js";
 
 async function runTests() {
   console.log("Starting Khadoom AI Harness Verification Tests...\n");
@@ -1566,6 +1566,16 @@ async function runTests() {
     assert.equal(updatedState.selectedPair, "commercial");
     assert.equal(updatedState.selectedReranker, "commercial");
     assert.equal(testRouter.getActiveDocsService().getRerankerMode(), "commercial");
+
+    // Verify commercial pair never leaks LLM_BASE_URL / EMBEDDING_BASE_URL when both env sets exist
+    process.env.LLM_BASE_URL = "https://colab-qwen-mock.trycloudflare.com/v1";
+    process.env.EMBEDDING_BASE_URL = "https://colab-embed-mock.trycloudflare.com/v1";
+    await testRouter.refreshStatus();
+    assert.equal(testRouter.getActivePair(), "commercial");
+    const commercialAgentCfg = testRouter.getActiveAgent().getModelConfig();
+    assert.equal(commercialAgentCfg.baseURL, undefined);
+    assert.equal(commercialAgentCfg.isCustomEndpoint, false);
+    assert.equal(commercialAgentCfg.model, "gpt-4o-mini");
   } finally {
     process.env.OPENAI_API_KEY = savedEnv.OPENAI_API_KEY;
     process.env.LLM_BASE_URL = savedEnv.LLM_BASE_URL;
@@ -1604,11 +1614,93 @@ async function runTests() {
   assert.ok(nativeHits.some((h) => h.chunkId === "doc_shipping_zones#chunk_0"));
   console.log("  Passed: Qdrant deterministic UUIDs and native VectorDB query delegation verified.");
 
+  // Test 43: Live AgentStep Stream Callbacks & Completed Steps Telemetry
+  console.log("\nTest 43: Testing Live AgentStep Callbacks & Completed Steps...");
+  const stepAgent = new KhadoomAgent(h5Repo, h5Staging, citeDocsService, c3Logger, "test-key");
+  let stepMockTurn = 0;
+  (stepAgent as any).openai = {
+    chat: {
+      completions: {
+        create: async () => {
+          stepMockTurn++;
+          if (stepMockTurn === 1) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "call_step_inspect",
+                        type: "function",
+                        function: {
+                          name: "inspect_store_data",
+                          arguments: JSON.stringify({ path: "/currency" }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 80, completion_tokens: 12, total_tokens: 92 },
+            };
+          }
+          return {
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: "Your store currency is SAR.",
+                },
+              },
+            ],
+            usage: { prompt_tokens: 110, completion_tokens: 14, total_tokens: 124 },
+          };
+        },
+      },
+    },
+  };
+  const emittedEvents: AgentStep[] = [];
+  const stepRes = await stepAgent.processUserPrompt(validStore.id, "Check my current store currency", {
+    onStep: (s) => emittedEvents.push(s),
+  });
+  assert.equal(stepRes.type, "answer");
+  assert.ok(stepRes.steps && stepRes.steps.length === 3, `Expected 3 steps, got ${stepRes.steps?.length}`);
+  assert.equal(stepRes.steps![0].toolName, "llm");
+  assert.equal(stepRes.steps![1].toolName, "inspect_store_data");
+  assert.equal(stepRes.steps![1].detail, "/currency");
+  assert.equal(stepRes.steps![2].toolName, "llm");
+  assert.ok(stepRes.steps!.every((s) => s.status === "done" && typeof s.durationMs === "number"));
+  // Each step emits running then done (6 events total)
+  assert.equal(emittedEvents.length, 6);
+  assert.equal(emittedEvents[0].status, "running");
+  assert.equal(emittedEvents[1].status, "done");
+  assert.equal(emittedEvents[2].status, "running");
+  assert.equal(emittedEvents[3].status, "done");
+
+  // Also test semantic cache hit step emission
+  await citeDocsService.setCachedAnswer(
+    "What currencies work with Tabby?",
+    "Tabby works with SAR and AED.",
+    ["Tabby Activation Guide"],
+    { currency: validStore.currency, locale: validStore.locale, country: "SA" }
+  );
+  const cacheEvents: AgentStep[] = [];
+  const cacheRes = await stepAgent.processUserPrompt(validStore.id, "What currencies work with Tabby?", {
+    onStep: (s) => cacheEvents.push(s),
+  });
+  assert.equal(cacheRes.telemetry?.semanticCacheHit, true);
+  assert.equal(cacheRes.steps?.length, 1);
+  assert.equal(cacheRes.steps?.[0].toolName, "semantic_cache");
+  assert.equal(cacheEvents.length, 2);
+  console.log("  Passed: Live AgentStep running/done stream callbacks and cache steps verified.");
+
   // Clean up test directory again
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 42 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  console.log(" ALL 43 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 

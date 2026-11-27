@@ -197,9 +197,9 @@ khadoom-agent-harness/
 ├── ui/                            # Modern React 18 + Vite Web Dashboard SPA
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── ChatPane.tsx       # Chat UI, clickable citation pills & highlighted passages
+│   │   │   ├── ChatPane.tsx       # Chat UI, live steps, metrics toggle & clickable citations
 │   │   │   ├── FormattedMessage.tsx # Markdown renderer
-│   │   │   ├── Header.tsx         # Router selector pill, store version, telemetry & reset
+│   │   │   ├── Header.tsx         # Router selector pill, store version, active model & reset
 │   │   │   ├── KhadoomIcon.tsx    # Branded icon components
 │   │   │   ├── LoadingIndicator.tsx # Animated agent thinking indicators
 │   │   │   ├── ProposalCard.tsx   # Interactive HITL staging cards (Accept/Reject/Modify)
@@ -213,7 +213,7 @@ khadoom-agent-harness/
 │   ├── tsconfig.json
 │   └── vite.config.ts
 ├── test/
-│   └── index.test.ts              # Complete 42-stage automated test suite
+│   └── index.test.ts              # Complete 43-stage automated test suite
 ├── docker-compose.yml             # Local Qdrant VectorDB service (Ports 6333/6334)
 ├── package.json
 └── tsconfig.json
@@ -231,34 +231,35 @@ The Web Dashboard offers an intuitive visual workspace built with **React 18**, 
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│  [Logo] Khadoom AI  |  Darb Roastery (v2)  |  Tokens: 2,410 ($0.00034)  |  [Reset Store]│
+│  [Logo] Khadoom AI  |  Darb Roastery (v2)  |  Commercial · RRF  |  gpt-4o-mini | Reset │
 ├────────────────────────────────────────┬───────────────────────────────────────────────┤
 │               CHAT PANE                │                  STORE PANE                   │
 │                                        │  [Products] [Theme] [Shipping] [Pay] [History]│
 │ > Merchant: "Enable Tabby & 10% off"   │                                               │
 │                                        │  Live Store State (Visualized):               │
-│ 🤖 Khadoom: "I've staged 2 changes:    │  • Ethiopian Yirgacheffe: 58.50 SAR (-10%)    │
-│                                        │  • Colombian Huila:       52.20 SAR (-10%)    │
-│  ┌──────────────────────────────────┐  │  • V60 Ceramic Dripper:   85.50 SAR (-10%)    │
-│  │ PROPOSED CHANGES (STAGING v2)    │  │                                               │
-│  │ 1. [PAYMENTS] Enable Tabby BNPL  │  │  Active Payment Gateways:                     │
-│  │ 2. [CATALOG]  Apply -10% discount│  │  [✓] Mada  [✓] Apple Pay  [✓] Tabby  [ ] COD  │
-│  │                                  │  │                                               │
-│  │   [Accept]  [Reject]  [Modify]   │  │  Version History & 1-Click Rollback:          │
-│  └──────────────────────────────────┘  │  • v2: Enabled Tabby & discount (Current)     │
-│                                        │  • v1: Initial store snapshot     [Rollback]  │
+│ ▸ Show steps and metrics (3)           │  • Ethiopian Yirgacheffe: 58.50 SAR (-10%)    │
+│ 🤖 Khadoom: "I've staged 2 changes:    │  • Colombian Huila:       52.20 SAR (-10%)    │
+│                                        │  • V60 Ceramic Dripper:   85.50 SAR (-10%)    │
+│  ┌──────────────────────────────────┐  │                                               │
+│  │ PROPOSED CHANGES (STAGING v2)    │  │  Active Payment Gateways:                     │
+│  │ 1. [PAYMENTS] Enable Tabby BNPL  │  │  [✓] Mada  [✓] Apple Pay  [✓] Tabby  [ ] COD  │
+│  │ 2. [CATALOG]  Apply -10% discount│  │                                               │
+│  │                                  │  │  Version History & 1-Click Rollback:          │
+│  │   [Accept]  [Reject]  [Modify]   │  │  • v2: Enabled Tabby & discount (Current)     │
+│  └──────────────────────────────────┘  │  • v1: Initial store snapshot     [Rollback]  │
+│                                        │                                               │
 │ [Quick Prompt Suggestions...]          │                                               │
 └────────────────────────────────────────┴───────────────────────────────────────────────┘
 ```
 
 #### Core Web Features:
 - **Dual-Pane Synchronized Layout**: The right pane immediately visualizes store state updates as soon as changes are staged or committed.
+- **Live Execution Steps & Per-Turn Metrics**: While the agent runs, SSE streams real-time steps (`Analyzing request & planning`, `Inspecting store data`, `Searching Mtajir documentation`, `Staging & validating store changes`) instead of a generic spinner. Completed replies include a collapsible **`Show steps and metrics`** toggle above the answer showing step durations, latency, token usage, and estimated cost.
 - **Interactive Proposal Cards**: Changes are displayed as structured cards with before/after diffs, arithmetic tags, and one-click **[Accept]**, **[Reject]**, or **[Modify]** actions.
 - **Store Visualizer Tabs**: Real-time inspection of **Products** (cards, prices, inventory badges), **Theme & Colors** (live color swatches and promotional banner preview), **Shipping Zones** (domestic & international rates), **Payment Providers** (active/test toggles), **Policies**, and **Version History**.
 - **1-Click Rollback & Store Reset**: Roll back to any historical snapshot directly from the Version History tab, or reset the store to the seed state with a single button.
 - **Model Pair & Reranker Router Pill**: Click the header router pill to switch between **Commercial (OpenAI)** and **Local/Open-Weight (Qwen 3)** pairs and pick a cross-pair **Reranker** (`Off`, `Local BGE-M3`, or `Commercial Cohere`); inactive/offline options appear greyed out and disabled.
 - **Clickable Citations & Highlighted Source Passages**: Source citation pills under RAG answers expand inline to show the retrieved section(s), relevance scores (`Rerank %`, `Vec %`, `BM25`, `RRF`), and highlighted excerpts aligned with the answer.
-- **Real-Time Telemetry Badges**: Live display of active model, throughput (`tok/s`), latency percentiles (`P50`/`P95` in tooltip), and cumulative USD spend in the header.
 - **Quick Action Chips**: One-tap sample prompts for sales campaigns, theme restyling, shipping policy updates, and payment gateway configuration.
 
 #### Launching the Web Dashboard:
@@ -288,10 +289,10 @@ npm run ui:build
 | `/api/providers` | `GET` | Returns active/inactive status of model pairs, rerankers, and VectorDB mode. |
 | `/api/providers/select` | `POST` | Switches active `modelPair` (`commercial` \| `local`) and/or `reranker` (`none` \| `local` \| `commercial`). |
 | `/api/providers/refresh` | `POST` | Re-probes Qdrant, local Colab/vLLM, and reranker endpoints on demand. |
-| `/api/chat` | `POST` | Dispatches merchant prompt to the active routed `KhadoomAgent` (`{ prompt, conversationId }`). |
+| `/api/chat` | `POST` | Dispatches merchant prompt to the active routed `KhadoomAgent` (`{ prompt, conversationId, stream? }`; returns JSON or SSE `step`/`done` stream). |
 | `/api/staging/accept` | `POST` | Commits staged mutation session to live store (`{ sessionId: string }`). |
 | `/api/staging/reject` | `POST` | Rejects and discards staged mutation session (`{ sessionId: string }`). |
-| `/api/staging/modify` | `POST` | Re-stages mutation incorporating feedback (`{ sessionId, feedback }`). |
+| `/api/staging/modify` | `POST` | Re-stages mutation incorporating feedback (`{ sessionId, feedback, stream? }`; returns JSON or SSE `step`/`done` stream). |
 | `/api/store/rollback` | `POST` | Restores store state to specified snapshot version (`{ version: number }`). |
 | `/api/store/reset` | `POST` | Resets store back to seed v1 snapshot. |
 | `/api/telemetry` | `GET` | Retrieves aggregate token counts, cache hits, and cumulative cost. |
@@ -332,7 +333,7 @@ npm start
 | **Cost & Token Monitoring** | Inspect live badges in the Web Dashboard header, call `GET /api/telemetry`, run `/cost` in the CLI, or view `data/logs/query-logs.jsonl`. | Real-time telemetry monitoring uncached vs cached prompt tokens, average latency, and cumulative USD spend. |
 | **Frontend UI Building** | Run `npm run ui:build` after editing React components in `ui/src/`. | Compiles production SPA assets into `ui/dist/` for static serving via `src/server.ts`. |
 | **Telemetry Log Rotation** | Periodically rotate, compress, or truncate `data/logs/query-logs.jsonl` in production. | Standard append-only log maintenance. |
-| **Continuous Verification** | Run `npm test` after any documentation, schema, UI, or algorithm change. | Executes 42 end-to-end automated verification stages in ~3s locally. |
+| **Continuous Verification** | Run `npm test` after any documentation, schema, UI, or algorithm change. | Executes 43 end-to-end automated verification stages locally. |
 | **RAG Evaluation (Ragas)** | Run `npm run eval:rag` then `python evals/score_with_ragas.py` (see [`evals/README.md`](evals/README.md)). | Benchmarks `bm25_only`, `vectordb_only`, `hybrid_rrf`, and `hybrid_rrf_rerank` across core Ragas metrics. |
 
 ---
@@ -393,54 +394,16 @@ The bilingual BM25 tokenizer in [`src/rag/bm25-search.ts`](src/rag/bm25-search.t
 
 ## Verification Test Suite
 
-Run the full end-to-end test suite:
+Run the full automated suite:
 ```bash
 npm test
 ```
 
-The test suite validates 42 distinct stages:
-1. Seed Store Zod schema compliance
-2. Invalid schema rejection (e.g., malformed hex colors)
-3. Snapshot storage & initial v1 changelog creation
-4. In-memory reversible staging of RFC 6902 patches
-5. Semantic feature diff card generation
-6. Optimistic concurrency conflict detection
-7. Staging acceptance & commit versioning
-8. Live store rollback with history preservation
-9. Documentation search & caching functionality
-10. Precise token cost calculations for `gpt-4o-mini`
-11. QueryLogger JSONL persistence & summary analytics
-12. Predicate path compilation (`[id=xyz]` resolution)
-13. End-to-end predicate mutation staging (e.g. enabling COD)
-14. Arithmetic delta operations with non-negative clamping
-15. Percentage-based scaling operations
-16. Array wildcard expansion (`/products[*]/price`)
-17. Compound response data contracts (simultaneous Q&A + mutation)
-18. No-Op / redundant modification prevention
-19. Deterministic rollback prompt guidance
-20. High-water mark versioning after rollback
-21. Markdown corpus loader, frontmatter extraction & section chunking
-22. Arabic clitic and prefix normalization in BM25
-23. `EmbeddingsStore` disk persistence & MD5 deduplication
-24. Store constraint filtering (SAR vs KWD doc isolation)
-25. Context-scoped semantic caching, paraphrase matching ($\ge 0.94$), and corpus invalidation
-26. Embeddings dimension and model validation with automatic store repair
-27. Live semantic cache file isolation during verification tests
-28. Store-state dynamic inspection cache-poisoning guard
-29. Descending multi-item removals and sequential index-shifting patch compilation
-30. Multi-line YAML frontmatter tag parsing
-31. Lazy vector hydration and empty-store embed skip
-32. Commit-time optimistic concurrency guard (TOCTOU protection)
-33. Bounded multi-turn session memory
-34. Self-correction context preservation, fast conflict fail, and cumulative mutations
-35. Safe malformed tool-call JSON recovery and fenced JSON stripping
-36. Open-weight Colab/vLLM endpoint config, `<think>` stripping, and L4 hourly cost calculation
-37. Per-model throughput (`tok/s`), latency percentiles (`P50`/`P95`), and benchmark aggregation
-38. Modify-proposal `propose_store_changes` forced retry and error guard
-39. Citation passage highlight extraction and semantic cache preservation
-40. Cross-encoder reranker promotion and graceful RRF fallback
-41. `ProviderRouter` availability guards and cross-pair reranker switching
-42. Qdrant deterministic UUIDs and native `querySimilar` VectorDB delegation
+The 43-stage suite ([`test/index.test.ts`](test/index.test.ts)) covers four areas using in-memory/mocked LLM calls (no external API keys required):
+- **Mutation & Versioning Engine**: Zod validation, RFC 6902 + predicate/arithmetic/wildcard compilation, semantic diffing, no-op detection, optimistic concurrency (staging & commit TOCTOU guards), and high-water mark rollbacks.
+- **Bilingual Hybrid RAG & Qdrant**: Markdown chunking, Arabic clitic normalization, constraint isolation (`SAR` vs `KWD`), RRF + cross-encoder reranking/fallback, Qdrant UUID determinism & native `querySimilar`, citation passage highlighting, and context-scoped semantic caching.
+- **Agent Loop & Provider Routing**: Bounded session memory, self-correction context preservation, malformed tool-call JSON recovery, forced `propose_store_changes` on modify turns, `<think>` stripping, and `ProviderRouter` availability/switching.
+- **Live Streaming & Telemetry**: Per-model cost/throughput (`tok/s`, `P50`/`P95`) aggregation and `AgentStep` (`onStep`) live running/done stream emissions.
 
 ---
 
