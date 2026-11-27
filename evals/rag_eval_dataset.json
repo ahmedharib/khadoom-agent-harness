@@ -1,0 +1,146 @@
+[
+  {
+    "id": "eval_01_tabby_currencies",
+    "category": "payments_en",
+    "question": "Which currencies and documents are required to activate Tabby in live mode?",
+    "ground_truth": "To activate Tabby in live mode, the store must operate in SAR or AED and hold an active Saudi or UAE Commercial Registration (CR) or Freelance Certificate.",
+    "expected_doc_ids": ["doc_payment_tabby"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  },
+  {
+    "id": "eval_02_tabby_installments",
+    "category": "payments_en",
+    "question": "How many installments does Tabby split customer purchases into, and how should I test it before going live?",
+    "ground_truth": "Tabby splits customer purchases into 4 interest-free installments. You should verify checkout behavior while testMode is set to true, then switch testMode to false once your merchant account is verified.",
+    "expected_doc_ids": ["doc_payment_tabby"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  },
+  {
+    "id": "eval_03_tabby_arabic",
+    "category": "payments_ar",
+    "question": "كيف أفعل الدفع بالتقسيط لتابي وما هي المتطلبات؟",
+    "ground_truth": "لتفعيل تابي في الوضع المباشر يجب أن يعمل المتجر بعملة SAR أو AED مع وجود سجل تجاري سعودي أو إماراتي أو وثيقة عمل حر، ثم تفعيل tabby واختباره في وضع testMode قبل إيقافه.",
+    "expected_doc_ids": ["doc_payment_tabby"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "ar" }
+  },
+  {
+    "id": "eval_04_knet_kuwait",
+    "category": "constraint_kw",
+    "question": "Who can use the KNet payment gateway and what currency is required?",
+    "ground_truth": "KNet is exclusively for merchants operating in Kuwait (KW) using the Kuwaiti Dinar (KWD) with a licensed Kuwaiti commercial registration.",
+    "expected_doc_ids": ["doc_payment_knet"],
+    "store_constraints": { "currency": "KWD", "country": "KW", "locale": "en" }
+  },
+  {
+    "id": "eval_05_knet_arabic_kw",
+    "category": "constraint_kw_ar",
+    "question": "هل بوابة كي نت متاحة لمتجري في الكويت؟",
+    "ground_truth": "نعم، بوابة كي نت (KNet) مخصصة للمتاجر العاملة في الكويت (KW) بعملة الدينار الكويتي (KWD) مع وجود سجل تجاري كويتي مرخص.",
+    "expected_doc_ids": ["doc_payment_knet"],
+    "store_constraints": { "currency": "KWD", "country": "KW", "locale": "ar" }
+  },
+  {
+    "id": "eval_06_payment_providers",
+    "category": "payments_en",
+    "question": "What payment gateways does Mtajir support and how do I toggle one?",
+    "ground_truth": "Mtajir supports Mada (mada), Apple Pay (apple_pay), Credit Card Visa/Mastercard (credit_card), Tabby (tabby), and Cash on Delivery (cod). Each provider can be toggled via its enabled boolean flag (e.g., /paymentProviders[id=cod]/enabled).",
+    "expected_doc_ids": ["doc_payment_providers"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  },
+  {
+    "id": "eval_07_shipping_thresholds",
+    "category": "shipping_en",
+    "question": "How do I configure free shipping above a minimum order amount?",
+    "ground_truth": "You can set freeAboveAmount on any shipping rate inside a shipping zone, such as /shippingZones[id=zone_sa]/rates[id=rate_std]/freeAboveAmount for free Standard Delivery over 200 SAR.",
+    "expected_doc_ids": ["doc_shipping_zones"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  },
+  {
+    "id": "eval_08_shipping_arabic",
+    "category": "shipping_ar",
+    "question": "كيف أضبط مناطق الشحن وأسعار التوصيل السريع؟",
+    "ground_truth": "يتم إعداد الشحن عبر مناطق جغرافية (/shippingZones) مثل السعودية، وتحتوي كل منطقة على أسعار توصيل متعددة مثل التوصيل القياسي والتوصيل السريع (Express Same-Day Delivery) مع تحديد الاسم والسعر.",
+    "expected_doc_ids": ["doc_shipping_zones"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "ar" }
+  },
+  {
+    "id": "eval_09_theme_colors",
+    "category": "theme_en",
+    "question": "What color slots can be customized in a Mtajir store theme and what format is valid?",
+    "ground_truth": "Mtajir supports hex codes (#RRGGBB or #RGB) for four core palette slots: Primary (/theme/colors/primary), Secondary (/theme/colors/secondary), Background (/theme/colors/background), and Text (/theme/colors/text).",
+    "expected_doc_ids": ["doc_theme_customization"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  },
+  {
+    "id": "eval_10_theme_fonts_banner",
+    "category": "theme_en",
+    "question": "Which Arabic fonts are supported for typography and how does the announcement banner work?",
+    "ground_truth": "Popular Arabic and bilingual fonts include Tajawal, Cairo, and Inter, configurable independently for body text (/theme/typography/fontFamily) and headings (/theme/typography/headingFont). The announcement banner (/theme/banner) can be toggled via enabled and customized via text, backgroundColor, and linkUrl.",
+    "expected_doc_ids": ["doc_theme_customization"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  },
+  {
+    "id": "eval_11_theme_arabic",
+    "category": "theme_ar",
+    "question": "كيف أغير ألوان الثيم والخطوط والبنر الإعلاني؟",
+    "ground_truth": "يمكن تخصيص ألوان الثيم بصيغة hex عبر /theme/colors، وتغيير الخطوط مثل Tajawal وCairo عبر /theme/typography، وتفعيل البنر وتعديل نصه عبر /theme/banner.",
+    "expected_doc_ids": ["doc_theme_customization"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "ar" }
+  },
+  {
+    "id": "eval_12_products_discounts",
+    "category": "catalog_en",
+    "question": "How can I apply a discount across all products or a specific product category?",
+    "ground_truth": "Using Khadoom AI, merchants can apply store-wide percentage discounts across all products (/products[*]/price) or target a specific category (/products[categories=Coffee Beans]/price), and use compareAtPrice to display strikethrough sale pricing.",
+    "expected_doc_ids": ["doc_products_inventory"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  },
+  {
+    "id": "eval_13_products_inventory",
+    "category": "catalog_en",
+    "question": "What happens if inventory drops below zero and what product statuses exist?",
+    "ground_truth": "Inventory counts (/products[id=prod_001]/inventory) are automatically clamped at 0 so stock never becomes negative. Products can be marked as active, draft, or archived.",
+    "expected_doc_ids": ["doc_products_inventory"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  },
+  {
+    "id": "eval_14_products_arabic",
+    "category": "catalog_ar",
+    "question": "ما هي الحقول المطلوبة لإضافة منتج جديد وكيف يتم إدارة المخزون؟",
+    "ground_truth": "يتطلب كل منتج معرف id فريد وعنوان title ورمز SKU وسعر غير سالب وكمية مخزون صحيحة، ويتم تثبيت المخزون تلقائياً عند 0 كحد أدنى لمنع القيم السالبة مع دعم حالات active وdraft وarchived.",
+    "expected_doc_ids": ["doc_products_inventory"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "ar" }
+  },
+  {
+    "id": "eval_15_version_rollback",
+    "category": "system_en",
+    "question": "How does Mtajir store versioning prevent overwriting snapshots after a rollback?",
+    "ground_truth": "Mtajir uses high-water mark versioning where version numbers strictly increment past the highest recorded version, so rolling back and committing new changes creates a new version (e.g. v3) without overwriting earlier snapshots.",
+    "expected_doc_ids": ["doc_version_rollback"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  },
+  {
+    "id": "eval_16_rollback_arabic",
+    "category": "system_ar",
+    "question": "كيف أسترجع نسخة سابقة من المتجر وأشاهد سجل التغييرات؟",
+    "ground_truth": "يمكنك استرجاع أي نسخة سابقة عبر الأمر /rollback <version_number> مثل /rollback 1، وعرض سجل النسخ والتغييرات عبر الأمر /history.",
+    "expected_doc_ids": ["doc_version_rollback"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "ar" }
+  },
+  {
+    "id": "eval_17_sar_knet_blocked",
+    "category": "constraint_negative",
+    "question": "Can I enable KNet on my Saudi SAR store?",
+    "ground_truth": "KNet is exclusively available for Kuwait (KW) stores using KWD currency. Stores using SAR or AED should use Mada or local GCC gateways instead.",
+    "expected_doc_ids": ["doc_payment_providers"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  },
+  {
+    "id": "eval_18_unanswerable_crypto",
+    "category": "hallucination_trap",
+    "question": "Does Mtajir support Bitcoin or Ethereum cryptocurrency payments?",
+    "ground_truth": "The documentation does not list cryptocurrency payments such as Bitcoin or Ethereum as supported payment gateways in Mtajir.",
+    "expected_doc_ids": ["doc_payment_providers"],
+    "store_constraints": { "currency": "SAR", "country": "SA", "locale": "en" }
+  }
+]

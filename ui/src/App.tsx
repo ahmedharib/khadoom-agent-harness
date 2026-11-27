@@ -4,6 +4,9 @@ import {
   ChangelogEntry,
   TelemetrySummary,
   ModelConfigInfo,
+  RouterState,
+  ModelPairId,
+  RerankerMode,
   ChatMessage,
   StagingSession,
 } from "./types.js";
@@ -36,6 +39,7 @@ export const App: React.FC = () => {
   const [changelog, setChangelog] = useState<ChangelogEntry[]>([]);
   const [telemetry, setTelemetry] = useState<TelemetrySummary | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfigInfo | null>(null);
+  const [routerState, setRouterState] = useState<RouterState | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isUpdated, setIsUpdated] = useState<boolean>(false);
@@ -58,6 +62,7 @@ export const App: React.FC = () => {
       setChangelog(data.changelog || []);
       setTelemetry(data.telemetry || null);
       if (data.modelConfig) setModelConfig(data.modelConfig);
+      if (data.routerState) setRouterState(data.routerState);
     } catch (err) {
       console.error("[Init Error]", err);
     }
@@ -102,6 +107,7 @@ export const App: React.FC = () => {
         role: "assistant",
         content: bubbleContent,
         citations: data.citations || [],
+        citationDetails: data.citationDetails || [],
         stagedMutation: staged,
         navigationRoute: data.navigationRoute,
         timestamp: new Date().toISOString(),
@@ -247,6 +253,7 @@ export const App: React.FC = () => {
             ? "Updated staged proposal based on your feedback:"
             : data.message || data.reply || "Could not generate an updated proposal. Your previous staged proposal is still pending."),
         citations: data.citations || [],
+        citationDetails: data.citationDetails || [],
         stagedMutation: staged,
         timestamp: new Date().toISOString(),
       };
@@ -303,6 +310,36 @@ export const App: React.FC = () => {
     await handleRollbackToVersion(store.version - 1);
   };
 
+  // Switch model+embeddings pair or reranker via backend Router
+  const handleSelectRouter = async (selection: {
+    modelPair?: ModelPairId;
+    reranker?: RerankerMode;
+  }) => {
+    try {
+      const res = await fetch("/api/providers/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(selection),
+      });
+      const data = await res.json();
+      if (data.routerState) setRouterState(data.routerState);
+      if (data.modelConfig) setModelConfig(data.modelConfig);
+    } catch (err) {
+      console.error("[Router Select Error]", err);
+    }
+  };
+
+  const handleRefreshRouter = async () => {
+    try {
+      const res = await fetch("/api/providers/refresh", { method: "POST" });
+      const data = await res.json();
+      if (data.routerState) setRouterState(data.routerState);
+      if (data.modelConfig) setModelConfig(data.modelConfig);
+    } catch (err) {
+      console.error("[Router Refresh Error]", err);
+    }
+  };
+
   // Reset store to Seed v1
   const handleReset = async () => {
     if (!window.confirm("Reset store state back to initial Seed v1?")) return;
@@ -352,6 +389,9 @@ export const App: React.FC = () => {
         store={store}
         telemetry={telemetry}
         modelConfig={modelConfig}
+        routerState={routerState}
+        onSelectRouter={handleSelectRouter}
+        onRefreshRouter={handleRefreshRouter}
         onReset={handleReset}
         onRollback={handleRollbackOne}
         isLoading={isLoading}

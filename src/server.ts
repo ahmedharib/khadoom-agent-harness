@@ -20,9 +20,9 @@ const MIME_TYPES: Record<string, string> = {
 };
 import { StoreRepository } from "./storage/store.repository.js";
 import { StagingService } from "./staging/staging.service.js";
-import { DocsService } from "./rag/docs.service.js";
-import { KhadoomAgent } from "./agent/khadoom.agent.js";
 import { QueryLoggerService } from "./telemetry/query-logger.js";
+import { ProviderRouter, type ModelPairId } from "./routing/provider-router.js";
+import { type RerankerMode } from "./rag/docs.service.js";
 import { SEED_STORE } from "./data/seed-store.js";
 
 dotenv.config({ override: true });
@@ -33,9 +33,8 @@ const storeId = SEED_STORE.id;
 
 const repository = new StoreRepository();
 const stagingService = new StagingService(repository);
-const docsService = new DocsService();
 const queryLogger = new QueryLoggerService();
-let agent: KhadoomAgent;
+const router = new ProviderRouter({ repository, stagingService, queryLogger });
 
 // Helper to set CORS and JSON headers
 function sendJson(res: http.ServerResponse, statusCode: number, data: any) {
@@ -90,7 +89,46 @@ const server = http.createServer(async (req, res) => {
       }
       const changelog = await repository.getChangelog(storeId);
       const telemetry = await queryLogger.getSummary(storeId);
-      return sendJson(res, 200, { store, changelog, telemetry, modelConfig: agent.getModelConfig() });
+      return sendJson(res, 200, {
+        store,
+        changelog,
+        telemetry,
+        modelConfig: router.getActiveAgent().getModelConfig(),
+        routerState: router.getRouterState(),
+      });
+    }
+
+    // 1b. GET /api/providers - Inspect available LLM/Embeddings pairs, rerankers, and VectorDB status
+    if (req.method === "GET" && pathname === "/api/providers") {
+      return sendJson(res, 200, router.getRouterState());
+    }
+
+    // 1c. POST /api/providers/refresh - Re-probe local/Qdrant/commercial endpoints
+    if (req.method === "POST" && pathname === "/api/providers/refresh") {
+      const routerState = await router.refreshStatus();
+      return sendJson(res, 200, {
+        routerState,
+        modelConfig: router.getActiveAgent().getModelConfig(),
+      });
+    }
+
+    // 1d. POST /api/providers/select - Switch active Model+Embeddings pair and/or Reranker
+    if (req.method === "POST" && pathname === "/api/providers/select") {
+      const body = await parseJsonBody(req);
+      const modelPair = body.modelPair as ModelPairId | undefined;
+      const reranker = body.reranker as RerankerMode | undefined;
+      try {
+        const routerState = await router.setSelection({ modelPair, reranker });
+        return sendJson(res, 200, {
+          routerState,
+          modelConfig: router.getActiveAgent().getModelConfig(),
+        });
+      } catch (err: any) {
+        return sendJson(res, 400, {
+          error: err?.message || "Cannot switch provider selection",
+          routerState: router.getRouterState(),
+        });
+      }
     }
 
     // 2. POST /api/chat - Send merchant prompt to Khadoom
@@ -101,7 +139,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 400, { error: "prompt is required" });
       }
 
-      const turnResult = await agent.processUserPrompt(storeId, prompt.trim(), {
+      const turnResult = await router.getActiveAgent().processUserPrompt(storeId, prompt.trim(), {
         conversationId: typeof conversationId === "string" && conversationId ? conversationId : undefined,
       });
       const currentStore = await repository.getStore(storeId);
@@ -168,7 +206,7 @@ const server = http.createServer(async (req, res) => {
           )}) using this merchant feedback: "${feedback}". Preserve any unchanged parts of the proposal and call 'propose_store_changes' with the complete updated patch list.`
         : feedback;
 
-      const turnResult = await agent.processUserPrompt(storeId, modifyPrompt, {
+      const turnResult = await router.getActiveAgent().processUserPrompt(storeId, modifyPrompt, {
         conversationId: typeof conversationId === "string" && conversationId ? conversationId : undefined,
         requireMutationProposal: true,
       });
@@ -208,7 +246,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && pathname === "/api/store/reset") {
       const body = await parseJsonBody(req).catch(() => ({}));
       if (typeof body?.conversationId === "string" && body.conversationId) {
-        agent.clearConversation(body.conversationId);
+        router.getActiveAgent().clearConversation(body.conversationId);
       }
       const resetStore = await repository.saveInitialStore(SEED_STORE);
       const changelog = await repository.getChangelog(storeId);
@@ -259,27 +297,23 @@ const server = http.createServer(async (req, res) => {
 });
 
 async function start() {
-  console.log("[Khadoom API] Initializing RAG Corpus and Store Repository...");
-  await docsService.syncCorpusAndEmbeddings();
+  console.log("[Khadoom API] Initializing Provider Router, VectorDB/RAG & Store Repository...");
+  const routerState = await router.initialize();
 
   let store = await repository.getStore(storeId);
   if (!store) {
     store = await repository.saveInitialStore(SEED_STORE);
   }
 
-  agent = new KhadoomAgent(repository, stagingService, docsService, queryLogger);
-  const llmInfo = agent.getModelConfig();
-  if (llmInfo.isCustomEndpoint && llmInfo.model === "gpt-4o-mini") {
-    console.warn("[Warning] LLM_BASE_URL is set, but LLM_MODEL is still 'gpt-4o-mini'. Set LLM_MODEL=Qwen/Qwen3-8B in .env.");
-  } else if (!llmInfo.isCustomEndpoint && /^qwen/i.test(llmInfo.model)) {
-    console.warn(`[Warning] LLM_MODEL is '${llmInfo.model}' without LLM_BASE_URL. Requests will go to OpenAI and likely fail.`);
-  }
+  const llmInfo = router.getActiveAgent().getModelConfig();
 
   server.listen(PORT, HOST, () => {
     console.log(`\n==================================================`);
     console.log(`  KHADOOM API SERVER READY: http://${HOST}:${PORT}`);
-    console.log(`  LLM: ${llmInfo.model}${llmInfo.baseURL ? ` @ ${llmInfo.baseURL} [custom_endpoint]` : " [openai_api]"}`);
-    console.log(`  Store: ${store.name} (v${store.version})`);
+    console.log(`  Active Pair: ${routerState.selectedPair} (${llmInfo.model})`);
+    console.log(`  Reranker:    ${routerState.selectedReranker}`);
+    console.log(`  VectorDB:    ${routerState.vectorDb.mode} (${routerState.vectorDb.activeCollection})`);
+    console.log(`  Store:       ${store.name} (v${store.version})`);
     console.log(`==================================================\n`);
   });
 }

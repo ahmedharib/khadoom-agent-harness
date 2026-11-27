@@ -4,7 +4,67 @@ import { ProposalCard } from "./ProposalCard.js";
 import { KhadoomIcon } from "./KhadoomIcon.js";
 import { FormattedMessage } from "./FormattedMessage.js";
 import { PulsatingDots, TextShimmer } from "./LoadingIndicator.js";
-import { Send, User, BookOpen } from "lucide-react";
+import { Send, User, BookOpen, ChevronDown, ChevronUp, Highlighter } from "lucide-react";
+
+function renderHighlightedPassage(content: string, matchedExcerpts: string[]): React.ReactNode {
+  if (!matchedExcerpts || matchedExcerpts.length === 0) {
+    return content;
+  }
+
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const excerpt of matchedExcerpts) {
+    if (!excerpt) continue;
+    let idx = content.indexOf(excerpt);
+    if (idx === -1) {
+      idx = content.toLowerCase().indexOf(excerpt.toLowerCase());
+    }
+    if (idx !== -1) {
+      ranges.push({ start: idx, end: idx + excerpt.length });
+    }
+  }
+
+  if (ranges.length === 0) return content;
+
+  ranges.sort((a, b) => a.start - b.start);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const r of ranges) {
+    const prev = merged[merged.length - 1];
+    if (prev && r.start <= prev.end) {
+      prev.end = Math.max(prev.end, r.end);
+    } else {
+      merged.push({ ...r });
+    }
+  }
+
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  merged.forEach((r, i) => {
+    if (r.start > cursor) {
+      nodes.push(<span key={`t-${i}`}>{content.slice(cursor, r.start)}</span>);
+    }
+    nodes.push(
+      <mark
+        key={`m-${i}`}
+        style={{
+          backgroundColor: "rgba(165, 148, 249, 0.26)",
+          color: "var(--text-white)",
+          padding: "1px 4px",
+          borderRadius: "4px",
+          borderBottom: "1.5px solid var(--accent-lavender)",
+          fontWeight: 500,
+        }}
+      >
+        {content.slice(r.start, r.end)}
+      </mark>
+    );
+    cursor = r.end;
+  });
+
+  if (cursor < content.length) {
+    nodes.push(<span key="t-end">{content.slice(cursor)}</span>);
+  }
+  return nodes;
+}
 
 interface ChatPaneProps {
   messages: ChatMessage[];
@@ -32,6 +92,10 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   isLoading,
 }) => {
   const [inputText, setInputText] = useState("");
+  const [expandedCitation, setExpandedCitation] = useState<{
+    msgId: string;
+    title: string;
+  } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -230,46 +294,252 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
                   msg.content
                 )}
 
-                {/* Citations if available */}
-                {msg.citations && msg.citations.length > 0 && (
-                  <div
-                    style={{
-                      marginTop: "10px",
-                      paddingTop: "8px",
-                      borderTop: "1px solid rgba(255, 255, 255, 0.08)",
-                      display: "flex",
-                      alignItems: "center",
-                      flexWrap: "wrap",
-                      gap: "6px",
-                    }}
-                  >
-                    <BookOpen size={12} color="var(--accent-lavender)" />
-                    <span
+                {/* Clickable Citations & Expandable Highlighted Source Passages */}
+                {msg.citations && msg.citations.length > 0 && (() => {
+                  const selectedDetail =
+                    expandedCitation?.msgId === msg.id
+                      ? msg.citationDetails?.find((d) => d.title === expandedCitation.title)
+                      : undefined;
+                  const hasHighlightedParts = Boolean(
+                    selectedDetail?.passages.some((p) => p.matchedExcerpts.length > 0)
+                  );
+
+                  return (
+                    <div
                       style={{
-                        fontSize: "11px",
-                        color: "var(--text-secondary)",
+                        marginTop: "10px",
+                        paddingTop: "8px",
+                        borderTop: "1px solid rgba(255, 255, 255, 0.08)",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "8px",
                       }}
                     >
-                      Sources:
-                    </span>
-                    {msg.citations.map((cite, cIdx) => (
-                      <span
-                        key={cIdx}
+                      <div
                         style={{
-                          fontSize: "11px",
-                          fontWeight: 500,
-                          backgroundColor: "rgba(165, 148, 249, 0.12)",
-                          color: "var(--accent-lavender)",
-                          padding: "2px 8px",
-                          borderRadius: "9999px",
-                          border: "1px solid rgba(165, 148, 249, 0.25)",
+                          display: "flex",
+                          alignItems: "center",
+                          flexWrap: "wrap",
+                          gap: "6px",
                         }}
                       >
-                        {cite}
-                      </span>
-                    ))}
-                  </div>
-                )}
+                        <BookOpen size={12} color="var(--accent-lavender)" />
+                        <span
+                          style={{
+                            fontSize: "11px",
+                            color: "var(--text-secondary)",
+                          }}
+                        >
+                          Sources:
+                        </span>
+                        {msg.citations.map((cite, cIdx) => {
+                          const detail = msg.citationDetails?.find((d) => d.title === cite);
+                          const isSelected =
+                            expandedCitation?.msgId === msg.id &&
+                            expandedCitation?.title === cite;
+                          const isClickable = Boolean(detail && detail.passages.length > 0);
+
+                          return (
+                            <button
+                              key={cIdx}
+                              type="button"
+                              disabled={!isClickable}
+                              title={
+                                isClickable
+                                  ? isSelected
+                                    ? "Hide retrieved passage"
+                                    : "Click to inspect retrieved passage"
+                                  : "Cached citation title"
+                              }
+                              onClick={() => {
+                                if (!isClickable) return;
+                                setExpandedCitation(
+                                  isSelected ? null : { msgId: msg.id, title: cite }
+                                );
+                              }}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "4px",
+                                fontSize: "11px",
+                                fontWeight: 500,
+                                backgroundColor: isSelected
+                                  ? "rgba(165, 148, 249, 0.26)"
+                                  : "rgba(165, 148, 249, 0.12)",
+                                color: isSelected
+                                  ? "var(--text-white)"
+                                  : "var(--accent-lavender)",
+                                padding: "2px 9px",
+                                borderRadius: "9999px",
+                                border: isSelected
+                                  ? "1px solid var(--accent-lavender)"
+                                  : "1px solid rgba(165, 148, 249, 0.25)",
+                                cursor: isClickable ? "pointer" : "default",
+                                transition: "all 0.15s ease",
+                                fontFamily: "inherit",
+                              }}
+                            >
+                              <span>{cite}</span>
+                              {isClickable &&
+                                (isSelected ? (
+                                  <ChevronUp size={12} />
+                                ) : (
+                                  <ChevronDown size={12} />
+                                ))}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {selectedDetail && (
+                        <div
+                          style={{
+                            backgroundColor: "var(--bg-obsidian)",
+                            border: "1px solid var(--border-indigo)",
+                            borderRadius: "10px",
+                            padding: "10px 12px",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "10px",
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              flexWrap: "wrap",
+                              gap: "6px",
+                              borderBottom: "1px solid var(--border-subtle)",
+                              paddingBottom: "6px",
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "6px",
+                              }}
+                            >
+                              <span
+                                style={{
+                                  fontSize: "10px",
+                                  fontWeight: 700,
+                                  textTransform: "uppercase",
+                                  letterSpacing: "0.04em",
+                                  backgroundColor: "var(--surface-indigo)",
+                                  color: "var(--accent-lavender)",
+                                  padding: "2px 6px",
+                                  borderRadius: "4px",
+                                }}
+                              >
+                                {selectedDetail.category}
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: "12px",
+                                  fontWeight: 600,
+                                  color: "var(--text-white)",
+                                }}
+                              >
+                                {selectedDetail.title}
+                              </span>
+                            </div>
+
+                            {hasHighlightedParts && (
+                              <span
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: "4px",
+                                  fontSize: "10.5px",
+                                  color: "var(--accent-lavender)",
+                                }}
+                              >
+                                <Highlighter size={11} />
+                                Highlighted = used in answer
+                              </span>
+                            )}
+                          </div>
+
+                          {selectedDetail.passages.map((passage) => (
+                            <div
+                              key={passage.chunkId}
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "4px",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  gap: "8px",
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    fontSize: "11px",
+                                    fontWeight: 600,
+                                    color: "var(--text-secondary)",
+                                  }}
+                                >
+                                  § {passage.sectionHeader}
+                                </span>
+                                <span
+                                  style={{
+                                    fontSize: "10px",
+                                    color: "var(--text-muted)",
+                                  }}
+                                >
+                                  {[
+                                    passage.rerankScore !== undefined
+                                      ? `Rerank ${(passage.rerankScore * 100).toFixed(0)}%`
+                                      : null,
+                                    passage.vectorSimilarity !== undefined
+                                      ? `Vec ${(passage.vectorSimilarity * 100).toFixed(0)}%`
+                                      : null,
+                                    passage.bm25Score !== undefined
+                                      ? `BM25 ${passage.bm25Score.toFixed(2)}`
+                                      : null,
+                                    passage.rrfScore !== undefined
+                                      ? `RRF ${passage.rrfScore.toFixed(4)}`
+                                      : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" · ")}
+                                </span>
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: "12.5px",
+                                  lineHeight: "1.6",
+                                  color: "var(--text-secondary)",
+                                  whiteSpace: "pre-wrap",
+                                  backgroundColor: "rgba(255, 255, 255, 0.02)",
+                                  padding: "8px 10px",
+                                  borderRadius: "6px",
+                                  borderLeft:
+                                    passage.matchedExcerpts.length > 0
+                                      ? "2px solid var(--accent-lavender)"
+                                      : "2px solid var(--border-subtle)",
+                                }}
+                              >
+                                {renderHighlightedPassage(
+                                  passage.content,
+                                  passage.matchedExcerpts
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Staged Mutation Card */}

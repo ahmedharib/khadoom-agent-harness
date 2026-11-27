@@ -10,6 +10,10 @@ import { DocsService, FileEmbeddingsStore, InMemoryEmbeddingsStore } from "../sr
 import { cosineSimilarity } from "../src/rag/embeddings.js";
 import { loadDocumentationCorpus } from "../src/rag/doc-loader.js";
 import { BM25SearchEngine, normalizeAndTokenize } from "../src/rag/bm25-search.js";
+import { extractMatchedExcerpts, buildCitationDetails } from "../src/rag/citation-highlighter.js";
+import { RerankerService } from "../src/rag/reranker.js";
+import { chunkIdToUuid } from "../src/rag/qdrant-store.js";
+import { ProviderRouter } from "../src/routing/provider-router.js";
 import { JsonPatchOperation } from "../src/schema/patch.schema.js";
 import {
   QueryLoggerService,
@@ -1352,11 +1356,259 @@ async function runTests() {
   assert.match(modifyRefused.message, /propose_store_changes/i);
   console.log("  Passed: Modify tool enforcement forced retry and error guard verified.");
 
+  // Test 39 (Citation Passages & Highlight Extraction): Highlighted excerpts & cache preservation
+  console.log("\nTest 39 (Citation Passages): Testing Passage Highlight Extraction & Cache Preservation...");
+  const samplePassage = [
+    "1. Navigate to /settings/payments or ask Khadoom AI to enable Tabby.",
+    "2. Verify checkout behavior while testMode is set to true.",
+    "3. Switch testMode to false once your merchant account is verified.",
+  ].join("\n");
+  const excerptRes = extractMatchedExcerpts(
+    samplePassage,
+    "Switch testMode to false after your merchant account is verified.",
+    "when do I disable testMode"
+  );
+  assert.equal(excerptRes.matchedExcerpts.length, 1);
+  assert.ok(excerptRes.matchedExcerpts[0].includes("Switch testMode to false"));
+  assert.ok(excerptRes.answerOverlapScore > 0);
+
+  const builtDetails = buildCitationDetails(
+    [
+      {
+        id: "doc_payment_tabby",
+        docId: "doc_payment_tabby",
+        chunkId: "doc_payment_tabby_chunk_2",
+        title: "Configuring Tabby (Buy Now, Pay Later)",
+        category: "Payments",
+        sectionHeader: "Activation Steps",
+        content: samplePassage,
+        tags: ["tabby"],
+        rrfScore: 0.032,
+        metadata: { entities: ["Tabby"], tags: ["tabby"] },
+      },
+    ],
+    "Switch testMode to false after your merchant account is verified.",
+    "when do I disable testMode"
+  );
+  assert.equal(builtDetails.length, 1);
+  assert.equal(builtDetails[0].passages[0].matchedExcerpts.length, 1);
+
+  const citeCacheDir = path.join(testDir, "cite-cache");
+  const citeDocsService = new DocsService({
+    embeddingsStore: new InMemoryEmbeddingsStore(),
+    persistCachePath: path.join(citeCacheDir, "semantic-cache.json"),
+    embedder: async (text: string) => {
+      const lower = text.toLowerCase();
+      return [
+        lower.includes("tabby") || lower.includes("installment") ? 1 : 0,
+        lower.includes("testmode") || lower.includes("activate") || lower.includes("requirement") ? 1 : 0,
+        0.1,
+      ];
+    },
+  });
+  await citeDocsService.syncCorpusAndEmbeddings();
+  const citeAgent = new KhadoomAgent(h5Repo, h5Staging, citeDocsService, c3Logger, "test-key");
+  let citeStep = 0;
+  (citeAgent as any).openai = {
+    chat: {
+      completions: {
+        create: async () => {
+          citeStep++;
+          if (citeStep === 1) {
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "call_cite_search",
+                        type: "function",
+                        function: {
+                          name: "search_documentation",
+                          arguments: JSON.stringify({ query: "Tabby activation requirements SAR AED" }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 100, completion_tokens: 15, total_tokens: 115 },
+            };
+          }
+          return {
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content:
+                    "To activate Tabby in live mode, your store must operate in SAR or AED and hold a Saudi or UAE Commercial Registration.",
+                },
+              },
+            ],
+            usage: { prompt_tokens: 200, completion_tokens: 30, total_tokens: 230 },
+          };
+        },
+      },
+    },
+  };
+
+  const citeFirstRes = await citeAgent.processUserPrompt(
+    validStore.id,
+    "What are the requirements to activate Tabby?"
+  );
+  assert.equal(citeFirstRes.type, "answer");
+  assert.ok(citeFirstRes.citations && citeFirstRes.citations.length > 0);
+  assert.ok(citeFirstRes.citationDetails && citeFirstRes.citationDetails.length > 0);
+  const tabbyDetail = citeFirstRes.citationDetails!.find((d) => d.docId === "doc_payment_tabby");
+  assert.ok(tabbyDetail, "Expected doc_payment_tabby in citationDetails");
+  assert.ok(
+    tabbyDetail!.passages[0].matchedExcerpts.some((e) => e.includes("Commercial Registration")),
+    "Top passage must highlight the Commercial Registration sentence used in the answer"
+  );
+
+  // Repeat identical query: must hit semantic cache AND preserve citationDetails
+  const citeCachedRes = await citeAgent.processUserPrompt(
+    validStore.id,
+    "What are the requirements to activate Tabby?"
+  );
+  assert.equal(citeCachedRes.telemetry?.semanticCacheHit, true);
+  assert.ok(citeCachedRes.citationDetails && citeCachedRes.citationDetails.length > 0);
+  assert.equal(citeCachedRes.citationDetails![0].title, citeFirstRes.citationDetails![0].title);
+  console.log("  Passed: Citation passage extraction, highlighting, and cache preservation verified.");
+
+  // Test 40 (Cross-Encoder Reranker + Fallback): Rerank RRF candidates and fall back cleanly on errors
+  console.log("\nTest 40 (Reranker): Testing Cross-Encoder Reranking & Fallback...");
+  const rerankDocs = new DocsService({
+    embeddingsStore: new InMemoryEmbeddingsStore(),
+    persistCachePath: path.join(testDir, "rerank-cache.json"),
+    embedder: async () => [0.5, 0.5, 0.5],
+    reranker: new RerankerService({
+      customReranker: async (_q, docs, topN) => {
+        // Promote doc_shipping_zones chunk to rank 1
+        const sorted = [...docs].sort((a, b) => {
+          const aShip = a.chunkId.includes("shipping") ? 1 : 0;
+          const bShip = b.chunkId.includes("shipping") ? 1 : 0;
+          return bShip - aShip;
+        });
+        return sorted.slice(0, topN).map((d, idx) => ({
+          chunkId: d.chunkId,
+          score: d.chunkId.includes("shipping") ? 0.97 : 0.42,
+          rank: idx + 1,
+        }));
+      },
+    }),
+    rerankerMode: "local",
+  });
+  await rerankDocs.syncCorpusAndEmbeddings();
+  const rerankedHits = await rerankDocs.searchDocs("delivery free threshold", { limit: 3 });
+  assert.ok(rerankedHits.length > 0);
+  assert.equal(rerankedHits[0].docId, "doc_shipping_zones");
+  assert.equal(rerankedHits[0].rerankScore, 0.97);
+  assert.equal(rerankedHits[0].rerankRank, 1);
+
+  // Verify graceful fallback to RRF when reranker fails
+  rerankDocs.setReranker(
+    new RerankerService({
+      customReranker: async () => {
+        throw new Error("Simulated reranker timeout");
+      },
+    }),
+    "commercial"
+  );
+  const fallbackHits = await rerankDocs.searchDocs("shipping zones", { limit: 3 });
+  assert.ok(fallbackHits.length > 0);
+  assert.equal(fallbackHits[0].rerankScore, undefined);
+  console.log("  Passed: Reranker promotion and graceful RRF fallback verified.");
+
+  // Test 41 (Provider Router & Inactive Option Guards): Reject inactive pairs/rerankers
+  console.log("\nTest 41 (Router): Testing ProviderRouter Availability Guards & Cross-Pair Switching...");
+  const savedEnv = {
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    LLM_BASE_URL: process.env.LLM_BASE_URL,
+    EMBEDDING_BASE_URL: process.env.EMBEDDING_BASE_URL,
+    RERANKER_BASE_URL: process.env.RERANKER_BASE_URL,
+    COHERE_API_KEY: process.env.COHERE_API_KEY,
+  };
+  try {
+    process.env.OPENAI_API_KEY = "sk-test-commercial-key";
+    delete process.env.LLM_BASE_URL;
+    delete process.env.EMBEDDING_BASE_URL;
+    delete process.env.RERANKER_BASE_URL;
+    process.env.COHERE_API_KEY = "cohere-test-key";
+
+    const testRouter = new ProviderRouter({
+      repository: h5Repo,
+      stagingService: h5Staging,
+      queryLogger: c3Logger,
+      qdrantUrl: "http://127.0.0.1:19999", // unreachable -> cleanly falls back to file store
+    });
+    const rState = await testRouter.initialize();
+    assert.equal(rState.vectorDb.mode, "file");
+    assert.equal(rState.selectedPair, "commercial");
+    assert.equal(rState.modelPairs.find((p) => p.id === "commercial")?.active, true);
+    assert.equal(rState.modelPairs.find((p) => p.id === "local")?.active, false);
+    assert.equal(rState.rerankers.find((r) => r.id === "local")?.active, false);
+    assert.equal(rState.rerankers.find((r) => r.id === "commercial")?.active, true);
+
+    await assert.rejects(
+      () => testRouter.setSelection({ modelPair: "local" }),
+      /inactive/i
+    );
+    await assert.rejects(
+      () => testRouter.setSelection({ reranker: "local" }),
+      /inactive/i
+    );
+
+    // Commercial pair can select Commercial reranker cleanly
+    const updatedState = await testRouter.setSelection({ reranker: "commercial" });
+    assert.equal(updatedState.selectedPair, "commercial");
+    assert.equal(updatedState.selectedReranker, "commercial");
+    assert.equal(testRouter.getActiveDocsService().getRerankerMode(), "commercial");
+  } finally {
+    process.env.OPENAI_API_KEY = savedEnv.OPENAI_API_KEY;
+    process.env.LLM_BASE_URL = savedEnv.LLM_BASE_URL;
+    process.env.EMBEDDING_BASE_URL = savedEnv.EMBEDDING_BASE_URL;
+    process.env.RERANKER_BASE_URL = savedEnv.RERANKER_BASE_URL;
+    process.env.COHERE_API_KEY = savedEnv.COHERE_API_KEY;
+  }
+  console.log("  Passed: ProviderRouter availability detection, inactive blocking, and cross-pair reranker verified.");
+
+  // Test 42 (VectorDB Native Query Delegation & Deterministic UUIDs)
+  console.log("\nTest 42 (VectorDB): Testing Qdrant UUID Determinism & Native querySimilar Delegation...");
+  const uuidA1 = chunkIdToUuid("doc_payment_tabby#chunk_0");
+  const uuidA2 = chunkIdToUuid("doc_payment_tabby#chunk_0");
+  const uuidB = chunkIdToUuid("doc_payment_tabby#chunk_1");
+  assert.equal(uuidA1, uuidA2);
+  assert.notEqual(uuidA1, uuidB);
+  assert.match(uuidA1, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/);
+
+  let nativeQueryCalled = false;
+  const mockVectorDbStore = {
+    loadEmbeddings: async () => new Map(),
+    saveEmbeddings: async () => {},
+    getCorpusHash: async () => null,
+    querySimilar: async () => {
+      nativeQueryCalled = true;
+      return [{ chunkId: "doc_shipping_zones#chunk_0", similarity: 0.91 }];
+    },
+  };
+  const nativeDocs = new DocsService({
+    embeddingsStore: mockVectorDbStore,
+    persistCachePath: path.join(testDir, "native-qdrant-cache.json"),
+    embedder: async () => [0.1, 0.2, 0.3],
+  });
+  const nativeHits = await nativeDocs.searchDocs("shipping zones", { limit: 3, currency: "SAR" });
+  assert.equal(nativeQueryCalled, true);
+  assert.ok(nativeHits.some((h) => h.chunkId === "doc_shipping_zones#chunk_0"));
+  console.log("  Passed: Qdrant deterministic UUIDs and native VectorDB query delegation verified.");
+
   // Clean up test directory again
   await fs.rm(testDir, { recursive: true, force: true });
 
   console.log("\n==================================================");
-  console.log(" ALL 38 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
+  console.log(" ALL 42 VERIFICATION TESTS PASSED SUCCESSFULLY!   ");
   console.log("==================================================");
 }
 

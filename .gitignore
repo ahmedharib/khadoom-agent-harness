@@ -12,6 +12,14 @@ dist/
 # Runtime demo data & logs
 /data/
 /test-data/
+evals/results/
+
+# Jupyter & Python runtime artifacts
+.ipynb_checkpoints/
+notebooks/.jupyter/
+notebooks/.virtual_documents/
+__pycache__/
+*.pyc
 
 # Logs
 logs/

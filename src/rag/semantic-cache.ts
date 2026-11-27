@@ -4,10 +4,12 @@ import path from "node:path";
 import { cosineSimilarity, EmbeddingsService } from "./embeddings.js";
 import { StoreConstraintContext } from "./constraint-filter.js";
 import { tokenizeToWordForms } from "./bm25-search.js";
+import type { CitationDetail } from "./citation-highlighter.js";
 
 export interface CachedDocAnswer {
   answer: string;
   citations: string[];
+  citationDetails?: CitationDetail[];
   similarity: number;
   hitType: "exact" | "semantic";
 }
@@ -17,6 +19,7 @@ interface SemanticCacheEntry {
   queryVector: number[];
   answer: string;
   citations: string[];
+  citationDetails?: CitationDetail[];
   contextScope: string;
   corpusHash: string;
   createdAt: number;
@@ -132,7 +135,8 @@ export class SemanticCache {
     query: string,
     answer: string,
     citations: string[] = ["Semantic Cache (Mtajir Docs)"],
-    constraints?: StoreConstraintContext
+    constraints?: StoreConstraintContext,
+    citationDetails?: CitationDetail[]
   ): Promise<void> {
     const canonicalQuery = canonicalize(query);
     if (!canonicalQuery) return;
@@ -145,6 +149,7 @@ export class SemanticCache {
       queryVector,
       answer,
       citations,
+      ...(citationDetails && citationDetails.length > 0 ? { citationDetails } : {}),
       contextScope,
       corpusHash: this.corpusHash,
       createdAt: Date.now(),
@@ -181,6 +186,7 @@ export class SemanticCache {
       return {
         answer: exactMatch.answer,
         citations: exactMatch.citations,
+        ...(exactMatch.citationDetails ? { citationDetails: exactMatch.citationDetails } : {}),
         similarity: 1.0,
         hitType: "exact",
       };
@@ -209,6 +215,7 @@ export class SemanticCache {
       return {
         answer: bestEntry.answer,
         citations: bestEntry.citations,
+        ...(bestEntry.citationDetails ? { citationDetails: bestEntry.citationDetails } : {}),
         similarity: Number(bestSim.toFixed(6)),
         hitType: "semantic",
       };

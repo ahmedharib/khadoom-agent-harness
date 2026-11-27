@@ -10,8 +10,10 @@ import {
 import {
   EmbeddingsService,
   type EmbeddingsStore,
+  type EmbeddingsProfile,
   FileEmbeddingsStore,
   InMemoryEmbeddingsStore,
+  resolveDefaultEmbeddingsPath,
   type SyncEmbeddingsResult,
 } from "./embeddings.js";
 import {
@@ -19,15 +21,26 @@ import {
   HybridSearchEngine,
   type HybridSearchOptions,
 } from "./hybrid-search.js";
+import { RerankerService, type RerankerMode } from "./reranker.js";
 import { type CachedDocAnswer, SemanticCache } from "./semantic-cache.js";
 import { type StoreConstraintContext } from "./constraint-filter.js";
+import type { CitationDetail, CitationPassage } from "./citation-highlighter.js";
 
-export { FileEmbeddingsStore, InMemoryEmbeddingsStore };
+export {
+  FileEmbeddingsStore,
+  InMemoryEmbeddingsStore,
+  RerankerService,
+  resolveDefaultEmbeddingsPath,
+};
 export type {
   DocChunk,
   DocSearchResult,
   CachedDocAnswer,
+  CitationDetail,
+  CitationPassage,
   EmbeddingsStore,
+  EmbeddingsProfile,
+  RerankerMode,
   StoreConstraintContext,
   SyncEmbeddingsResult,
 };
@@ -57,6 +70,12 @@ export type SearchDocsOptions = HybridSearchOptions;
 export interface DocsServiceConfig {
   docsDir?: string;
   embeddingsStore?: EmbeddingsStore;
+  profile?: EmbeddingsProfile;
+  embeddingBaseURL?: string;
+  embeddingApiKey?: string;
+  embeddingModel?: string;
+  reranker?: RerankerService;
+  rerankerMode?: RerankerMode;
   similarityThreshold?: number;
   embedder?: (text: string) => Promise<number[]>;
   persistCachePath?: string;
@@ -69,6 +88,7 @@ export class DocsService {
   private embeddingsService: EmbeddingsService;
   private hybridSearch: HybridSearchEngine;
   private semanticCache: SemanticCache;
+  private reranker?: RerankerService;
 
   constructor(config: DocsServiceConfig = {}) {
     this.docsDir = config.docsDir;
@@ -83,17 +103,47 @@ export class DocsService {
     this.chunks = loaded.chunks;
     this.corpusHash = loaded.corpusHash;
 
+    const store =
+      config.embeddingsStore ||
+      new FileEmbeddingsStore(resolveDefaultEmbeddingsPath(config.profile ?? "commercial"));
+
     this.embeddingsService = new EmbeddingsService({
-      store: config.embeddingsStore,
+      store,
+      baseURL: config.embeddingBaseURL,
+      apiKey: config.embeddingApiKey,
+      model: config.embeddingModel,
       embedder: config.embedder,
     });
 
-    this.hybridSearch = new HybridSearchEngine(this.chunks, this.embeddingsService);
+    this.reranker = config.reranker;
+    this.hybridSearch = new HybridSearchEngine(
+      this.chunks,
+      this.embeddingsService,
+      this.reranker,
+      config.rerankerMode ?? "none"
+    );
     this.semanticCache = new SemanticCache(this.embeddingsService, {
       corpusHash: this.corpusHash,
       similarityThreshold: config.similarityThreshold ?? 0.9,
       persistPath: config.persistCachePath ?? resolveDefaultSemanticCachePath(),
     });
+  }
+
+  public setReranker(reranker: RerankerService, defaultMode: RerankerMode = "none"): void {
+    this.reranker = reranker;
+    this.hybridSearch.setReranker(reranker, defaultMode);
+  }
+
+  public setRerankerMode(mode: RerankerMode): void {
+    this.hybridSearch.setDefaultRerankerMode(mode);
+  }
+
+  public getRerankerMode(): RerankerMode {
+    return this.hybridSearch.getDefaultRerankerMode();
+  }
+
+  public getEmbeddingsService(): EmbeddingsService {
+    return this.embeddingsService;
   }
 
   /**
@@ -174,8 +224,9 @@ export class DocsService {
     query: string,
     answer: string,
     citations: string[] = ["Semantic Cache (Mtajir Docs)"],
-    options?: StoreConstraintContext
+    options?: StoreConstraintContext,
+    citationDetails?: CitationDetail[]
   ): Promise<void> {
-    await this.semanticCache.set(query, answer, citations, options);
+    await this.semanticCache.set(query, answer, citations, options, citationDetails);
   }
 }

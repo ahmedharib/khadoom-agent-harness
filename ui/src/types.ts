@@ -171,11 +171,54 @@ export interface ModelConfigInfo {
   disableThinking: boolean;
 }
 
+export type ModelPairId = "commercial" | "local";
+export type RerankerMode = "none" | "local" | "commercial";
+
+export interface RouterOptionStatus<T extends string = string> {
+  id: T;
+  label: string;
+  subtitle: string;
+  active: boolean;
+  reason?: string;
+}
+
+export interface RouterState {
+  selectedPair: ModelPairId;
+  selectedReranker: RerankerMode;
+  vectorDb: {
+    mode: "qdrant" | "file";
+    url?: string;
+    activeCollection: string;
+  };
+  modelPairs: RouterOptionStatus<ModelPairId>[];
+  rerankers: RouterOptionStatus<RerankerMode>[];
+}
+
+export interface CitationPassage {
+  chunkId: string;
+  sectionHeader: string;
+  content: string;
+  matchedExcerpts: string[];
+  rrfScore?: number;
+  vectorSimilarity?: number;
+  bm25Score?: number;
+  rerankScore?: number;
+  answerOverlapScore: number;
+}
+
+export interface CitationDetail {
+  docId: string;
+  title: string;
+  category: string;
+  passages: CitationPassage[];
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   citations?: string[];
+  citationDetails?: CitationDetail[];
   stagedMutation?: StagingSession;
   navigationRoute?: string;
   timestamp: string;

@@ -1,7 +1,8 @@
 import OpenAI from "openai";
 import { StoreRepository } from "../storage/store.repository.js";
 import { StagingService, StagingSession } from "../staging/staging.service.js";
-import { DocsService } from "../rag/docs.service.js";
+import { DocsService, type DocSearchResult } from "../rag/docs.service.js";
+import { buildCitationDetails, type CitationDetail } from "../rag/citation-highlighter.js";
 import { JsonPatchOperation } from "../schema/patch.schema.js";
 import { MtajirStore } from "../schema/store.schema.js";
 import { compilePredicatePath, getValueAtPath as getCompiledValue } from "../patch/patch-compiler.js";
@@ -36,6 +37,7 @@ export interface AgentResponse {
   stagingSession?: StagingSession;
   navigationRoute?: string;
   citations?: string[];
+  citationDetails?: CitationDetail[];
   retryCount?: number;
   telemetry?: AgentTelemetry;
 }
@@ -546,6 +548,9 @@ ROLLBACK & VERSION REVERSIONS:
             cachedEntry.citations.length > 0
               ? cachedEntry.citations
               : ["Semantic Cache (Mtajir Docs)"],
+          ...(cachedEntry.citationDetails && cachedEntry.citationDetails.length > 0
+            ? { citationDetails: cachedEntry.citationDetails }
+            : {}),
         },
         "doc_question"
       );
@@ -577,6 +582,22 @@ ROLLBACK & VERSION REVERSIONS:
       const maxTurns = 6;
       const executedTools: string[] = [];
       const citations: string[] = [];
+      const retrievedDocChunks: DocSearchResult[] = [];
+      const buildCitationPayload = (answerText: string, allowedTitles = citations) => {
+        if (allowedTitles.length === 0) {
+          return { citations: undefined, citationDetails: undefined };
+        }
+        const details = buildCitationDetails(
+          retrievedDocChunks,
+          answerText,
+          userPrompt,
+          allowedTitles
+        );
+        return {
+          citations: allowedTitles,
+          citationDetails: details.length > 0 ? details : undefined,
+        };
+      };
       let activeStagedMutation: AgentResponse | null = null;
       let cumulativePatches: JsonPatchOperation[] = [];
       const cumulativeExplanations: string[] = [];
@@ -629,11 +650,15 @@ ROLLBACK & VERSION REVERSIONS:
           }
 
           if (activeStagedMutation && activeStagedMutation.type === "mutation_staged") {
+            const answerText = cleanContent || undefined;
+            const citePayload = buildCitationPayload(
+              answerText || activeStagedMutation.message
+            );
             return await finalize(
               {
                 ...activeStagedMutation,
-                answerText: cleanContent || undefined,
-                citations: citations.length > 0 ? citations : undefined,
+                answerText,
+                ...citePayload,
               },
               "mutation",
               executedTools
@@ -641,11 +666,12 @@ ROLLBACK & VERSION REVERSIONS:
           }
 
           if (activeStagedMutation && activeStagedMutation.type === "answer") {
+            const finalText = cleanContent || activeStagedMutation.message;
             return await finalize(
               {
                 type: "answer",
-                message: cleanContent || activeStagedMutation.message,
-                citations: citations.length > 0 ? citations : undefined,
+                message: finalText,
+                ...buildCitationPayload(finalText),
               },
               "conversation",
               executedTools
@@ -653,11 +679,12 @@ ROLLBACK & VERSION REVERSIONS:
           }
 
           if (activeStagedMutation && activeStagedMutation.type === "error") {
+            const finalText = cleanContent || activeStagedMutation.message;
             return await finalize(
               {
                 type: "error",
-                message: cleanContent || activeStagedMutation.message,
-                citations: citations.length > 0 ? citations : undefined,
+                message: finalText,
+                ...buildCitationPayload(finalText),
               },
               "error",
               executedTools
@@ -665,13 +692,14 @@ ROLLBACK & VERSION REVERSIONS:
           }
 
           if (activeNavigation) {
+            const answerText = cleanContent || undefined;
             return await finalize(
               {
                 type: "navigation",
                 navigationRoute: activeNavigation.route,
                 message: activeNavigation.reason,
-                answerText: cleanContent || undefined,
-                citations: citations.length > 0 ? citations : undefined,
+                answerText,
+                ...buildCitationPayload(answerText || activeNavigation.reason),
               },
               "navigation",
               executedTools
@@ -683,6 +711,10 @@ ROLLBACK & VERSION REVERSIONS:
               cleanContent || ""
             );
           const effectiveCitations = isNegativeOrOutOfScope ? [] : citations;
+          const effectiveCitePayload = buildCitationPayload(
+            cleanContent || "",
+            effectiveCitations
+          );
 
           const usedInspectTool = executedTools.includes("inspect_store_data");
           const usedMutationOrNavTool =
@@ -714,7 +746,8 @@ ROLLBACK & VERSION REVERSIONS:
               userPrompt,
               cleanContent,
               effectiveCitations,
-              storeConstraints
+              storeConstraints,
+              effectiveCitePayload.citationDetails
             );
           }
 
@@ -722,7 +755,7 @@ ROLLBACK & VERSION REVERSIONS:
             {
               type: "answer",
               message: cleanContent || "Done.",
-              citations: effectiveCitations.length > 0 ? effectiveCitations : undefined,
+              ...effectiveCitePayload,
             },
             finalIntent,
             executedTools
@@ -815,6 +848,9 @@ ROLLBACK & VERSION REVERSIONS:
             });
             results.forEach((r) => {
               if (!citations.includes(r.title)) citations.push(r.title);
+              if (!retrievedDocChunks.some((c) => c.chunkId === r.chunkId)) {
+                retrievedDocChunks.push(r);
+              }
             });
             const docContext = results
               .map((r) => `[${r.title} — ${r.sectionHeader}]: ${r.content}`)
@@ -855,7 +891,7 @@ ROLLBACK & VERSION REVERSIONS:
         return await finalize(
           {
             ...activeStagedMutation,
-            citations: citations.length > 0 ? citations : undefined,
+            ...buildCitationPayload(activeStagedMutation.message),
           },
           "mutation",
           executedTools
@@ -867,7 +903,7 @@ ROLLBACK & VERSION REVERSIONS:
           {
             type: "answer",
             message: activeStagedMutation.message,
-            citations: citations.length > 0 ? citations : undefined,
+            ...buildCitationPayload(activeStagedMutation.message),
           },
           "conversation",
           executedTools
@@ -880,7 +916,7 @@ ROLLBACK & VERSION REVERSIONS:
             type: "navigation",
             navigationRoute: activeNavigation.route,
             message: activeNavigation.reason,
-            citations: citations.length > 0 ? citations : undefined,
+            ...buildCitationPayload(activeNavigation.reason),
           },
           "navigation",
           executedTools
@@ -903,7 +939,7 @@ ROLLBACK & VERSION REVERSIONS:
         {
           type: "answer",
           message: "Request completed with tool operations.",
-          citations: citations.length > 0 ? citations : undefined,
+          ...buildCitationPayload("Request completed with tool operations."),
         },
         "conversation",
         executedTools

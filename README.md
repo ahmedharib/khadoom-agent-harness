@@ -58,13 +58,14 @@ Instead of letting an LLM rewrite entire store configurations (which causes hall
 
 ### Part II: Grounded Retrieval & Semantic Caching (RAG)
 
-#### 10. Entity-Linked Hybrid RAG Engine (BM25 + Dense Vectors + RRF)
-- Combines lexical keyword precision and dense semantic vectors:
-  - **Dense Vectors**: Semantic vector similarity via OpenAI `text-embedding-3-small` (1,536 dimensions).
+#### 10. Entity-Linked Hybrid RAG Engine (Qdrant VectorDB + BM25 + RRF + Reranker)
+- Combines lexical keyword precision, VectorDB ANN search, and cross-encoder reranking:
+  - **Vector Database (Qdrant)**: [`QdrantEmbeddingsStore`](src/rag/qdrant-store.ts) stores per-profile collections (`khadoom_docs_openai` 1,536-dim and `khadoom_docs_qwen` 1,024-dim) with native cosine ANN search and payload constraint filter pushdown; falls back seamlessly to disk JSON (`FileEmbeddingsStore`) when Qdrant is offline.
+  - **Dual Embedding Profiles**: Supports OpenAI `text-embedding-3-small` (`1536`-dim) and self-hosted `Qwen/Qwen3-Embedding-0.6B` (`1024`-dim) in separate stores to prevent dimension collisions.
   - **Bilingual Lexical BM25**: Okapi BM25 indexer ($k_1 = 1.5, b = 0.75$) with field boosting across titles, section headers, entities, and tags.
-  - **Reciprocal Rank Fusion (RRF)**: Merges lexical and vector search ranks using $RRF(d) = \sum \frac{1}{k + rank(d)}$ ($k = 60$), eliminating fragile score calibration.
-  - **Store Constraint Hard Filtering**: Prunes documentation incompatible with the store's active `currency` or `country` (e.g., filtering out KNet for Saudi SAR stores).
-  - **EmbeddingsStore Repository Adapter**: Abstract storage interface (`FileEmbeddingsStore` / `InMemoryEmbeddingsStore`) ready to swap to `pgvector`, `sqlite-vec`, or Qdrant.
+  - **Reciprocal Rank Fusion (RRF)**: Merges lexical and vector search ranks using $RRF(d) = \sum \frac{1}{k + rank(d)}$ ($k = 60$).
+  - **Cross-Encoder Reranker**: Optional stage-3 reranking in [`reranker.ts`](src/rag/reranker.ts) supporting **Local (`BAAI/bge-reranker-v2-m3`)** or **Commercial (Cohere `rerank-v3.5`)**, usable by either model pair with graceful RRF fallback.
+  - **Clickable Source Passages & Answer Highlighting**: [`citation-highlighter.ts`](src/rag/citation-highlighter.ts) scores retrieved sentences against the generated answer so UI citation pills expand to show exact passages with used excerpts highlighted.
   - **Deterministic MD5 Chunk Caching**: Chunks are hashed on content; re-indexing skips unchanged chunks, making embedding runs fast and virtually free.
 
 #### 11. Bilingual Arabic & English Text Normalization & Clitic Stemming
@@ -88,14 +89,12 @@ Instead of letting an LLM rewrite entire store configurations (which causes hall
 - **Irrelevant Retrieval Protection**: Out-of-scope inquiries (e.g. general software engineering, external AI/RAG system architecture, personal questions) are politely declined. The agent is explicitly forbidden from force-fitting unrelated store docs (such as Tabby installments or store snapshots) into synthetic answers.
 - **Attribution & Source Filtering**: If documentation retrieved during hybrid search is non-pertinent to the query, source citations are pruned, and false-positive Q&A is never cached.
 
-#### 14. Token Usage & Cost Telemetry
-- Real-time tracking of:
-  - Uncached prompt tokens
-  - Cached prompt tokens
-  - Completion tokens
-  - Latency in milliseconds
-  - Exact USD API cost breakdown based on model pricing tiers
-- Persisted to append-only JSONL logs (`data/logs/query-logs.jsonl`).
+#### 14. Per-Model Telemetry, Self-Hosted Serving & Provider Router
+- **Provider & RAG Router ([`provider-router.ts`](src/routing/provider-router.ts))**: Live-probes endpoints and switches cleanly between:
+  - **Commercial Pair**: OpenAI (`gpt-4o-mini` + `text-embedding-3-small`)
+  - **Local / Open-Weight Pair**: Self-hosted **Qwen 3** (`Qwen/Qwen3-8B-FP8` via vLLM + `Qwen/Qwen3-Embedding-0.6B`) using [`notebooks/khadoom_qwen3_colab_vllm.ipynb`](notebooks/khadoom_qwen3_colab_vllm.ipynb), with safe tool-call JSON recovery and `<think>` block stripping.
+  - **Cross-Pair Reranker**: Either pair can independently select `Off (RRF Only)`, `Local (BAAI/bge-reranker-v2-m3)`, or `Commercial (Cohere rerank-v3.5)`. Inactive options appear greyed out and disabled in the UI header pill.
+- **Benchmarking Telemetry ([`query-logger.ts`](src/telemetry/query-logger.ts))**: Tracks uncached/cached prompt tokens, completion tokens, `p50`/`p95` latency, `tokensPerSecond`, `msPerOutputToken`, JSON parse recoveries, semantic cache hits, exact API USD cost, amortized GPU runtime cost (`LLM_HOURLY_COST_USD`), and `byModel` breakdowns in append-only JSONL logs (`data/logs/query-logs.jsonl`).
 
 ---
 
@@ -139,8 +138,9 @@ khadoom-agent-harness/
 │   │   ├── doc-shipping-zones.md
 │   │   ├── doc-theme-customization.md
 │   │   └── doc-version-rollback.md
-│   ├── embeddings/                # Persisted chunk embeddings & MD5 content hashes
-│   │   └── doc-embeddings.json
+│   ├── embeddings/                # Persisted per-profile chunk embeddings & MD5 hashes
+│   │   ├── doc-embeddings.json    # Commercial OpenAI vectors (1536-dim)
+│   │   └── doc-embeddings-qwen.json # Local Qwen3 vectors (1024-dim)
 │   ├── logs/                      # Append-only query telemetry & cost logs
 │   │   └── query-logs.jsonl
 │   └── stores/                    # Live store JSONs, snapshots & changelogs
@@ -148,16 +148,22 @@ khadoom-agent-harness/
 │       └── store_darb_001/
 │           ├── changelog.json
 │           └── snapshots/
-│               ├── v1.json
-│               ├── v2.json
-│               └── v3.json
+│               └── v1.json
 ├── docs/
 │   └── RAG_IMPLEMENTATION_SPEC.md # Full RAG engine specification & architecture
+├── evals/                         # Bilingual RAG retrieval & Ragas evaluation suite
+│   ├── rag_eval_dataset.json      # 18 English/Arabic test cases + constraint/hallucination traps
+│   ├── run_rag_retrieval_eval.ts  # Benchmarks BM25, VectorDB, Hybrid RRF, & Reranked pipelines
+│   ├── score_with_ragas.py        # Computes Faithfulness, Relevancy, Precision, Recall & Correctness
+│   ├── requirements-evals.txt     # Python dependencies for Ragas scoring
+│   └── README.md
+├── notebooks/
+│   └── khadoom_qwen3_colab_vllm.ipynb # Colab L4 vLLM (Qwen3) + Embeddings & BGE-M3 Reranker sidecar
 ├── src/
 │   ├── index.ts                   # Public library exports
 │   ├── server.ts                  # HTTP REST API & static SPA server (Port 3005)
 │   ├── agent/
-│   │   └── khadoom.agent.ts       # OpenAI tool calling, self-correction & compound flow
+│   │   └── khadoom.agent.ts       # Tool calling, self-correction, OpenAI/vLLM compatibility & memory
 │   ├── data/
 │   │   └── seed-store.ts          # Seed store dataset ('Darb Roastery')
 │   ├── diff/
@@ -166,13 +172,18 @@ khadoom-agent-harness/
 │   │   └── patch-compiler.ts      # Predicate path compiler & arithmetic operator engine
 │   ├── rag/
 │   │   ├── bm25-search.ts         # Okapi BM25 engine with Arabic & English normalizer
+│   │   ├── citation-highlighter.ts # Extracts & highlights answer-aligned source excerpts
 │   │   ├── constraint-filter.ts   # Currency & country hard filter
 │   │   ├── doc-loader.ts          # Markdown frontmatter parser & section chunker
 │   │   ├── docs.service.ts        # Unified documentation & hybrid retrieval facade
-│   │   ├── embeddings.ts          # EmbeddingsStore adapter & vector search engine
-│   │   ├── hybrid-search.ts       # Reciprocal Rank Fusion (RRF) search engine
+│   │   ├── embeddings.ts          # EmbeddingsStore adapter & dual-profile vector service
+│   │   ├── hybrid-search.ts       # RRF fusion + cross-encoder reranking pipeline
+│   │   ├── qdrant-store.ts        # Qdrant VectorDB client with ANN query & payload filtering
+│   │   ├── reranker.ts            # Local (BGE-M3) & Commercial (Cohere) reranker service
 │   │   ├── semantic-cache.ts      # Context-scoped Tier 2 semantic query cache
-│   │   └── sync-embeddings.ts     # CLI script to embed and persist documentation corpus
+│   │   └── sync-embeddings.ts     # CLI script to sync OpenAI/Qwen embeddings & Qdrant
+│   ├── routing/
+│   │   └── provider-router.ts     # Probes & routes Commercial vs Local pairs + Rerankers
 │   ├── schema/
 │   │   ├── patch.schema.ts        # RFC 6902 + arithmetic JSON patch schema
 │   │   └── store.schema.ts        # Complete Mtajir store schema (Zod)
@@ -181,28 +192,29 @@ khadoom-agent-harness/
 │   ├── storage/
 │   │   └── store.repository.ts    # Snapshots, changelog & high-water mark rollback
 │   ├── telemetry/
-│   │   └── query-logger.ts        # Token usage tracking, cost calculator & JSONL logger
+│   │   └── query-logger.ts        # Per-model speed/latency/cost tracking & JSONL logger
 │   └── cli.ts                     # Merchant interactive CLI
 ├── ui/                            # Modern React 18 + Vite Web Dashboard SPA
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── ChatPane.tsx       # Conversational interface with quick chips & input
-│   │   │   ├── FormattedMessage.tsx # Markdown renderer & source citation badges
-│   │   │   ├── Header.tsx         # Store status, live version & telemetry cost summary
+│   │   │   ├── ChatPane.tsx       # Chat UI, clickable citation pills & highlighted passages
+│   │   │   ├── FormattedMessage.tsx # Markdown renderer
+│   │   │   ├── Header.tsx         # Router selector pill, store version, telemetry & reset
 │   │   │   ├── KhadoomIcon.tsx    # Branded icon components
 │   │   │   ├── LoadingIndicator.tsx # Animated agent thinking indicators
 │   │   │   ├── ProposalCard.tsx   # Interactive HITL staging cards (Accept/Reject/Modify)
 │   │   │   └── StorePane.tsx      # Tabbed live store visualizer & version history
 │   │   ├── App.tsx                # Main dual-pane application layout & state
-│   │   ├── index.css              # Custom styling & Tailwind-compatible utility classes
+│   │   ├── index.css              # Mtajir dark-first styling tokens
 │   │   ├── main.tsx               # React DOM entry point
 │   │   └── types.ts               # Shared TypeScript frontend contracts
-│   ├── dist/                      # Pre-built static SPA assets served by server.ts
+│   ├── dist/                      # Built static SPA assets served by server.ts (`npm run ui:build`)
 │   ├── package.json
 │   ├── tsconfig.json
 │   └── vite.config.ts
 ├── test/
-│   └── index.test.ts              # Complete 29-stage automated test suite
+│   └── index.test.ts              # Complete 42-stage automated test suite
+├── docker-compose.yml             # Local Qdrant VectorDB service (Ports 6333/6334)
 ├── package.json
 └── tsconfig.json
 ```
@@ -244,7 +256,9 @@ The Web Dashboard offers an intuitive visual workspace built with **React 18**, 
 - **Interactive Proposal Cards**: Changes are displayed as structured cards with before/after diffs, arithmetic tags, and one-click **[Accept]**, **[Reject]**, or **[Modify]** actions.
 - **Store Visualizer Tabs**: Real-time inspection of **Products** (cards, prices, inventory badges), **Theme & Colors** (live color swatches and promotional banner preview), **Shipping Zones** (domestic & international rates), **Payment Providers** (active/test toggles), **Policies**, and **Version History**.
 - **1-Click Rollback & Store Reset**: Roll back to any historical snapshot directly from the Version History tab, or reset the store to the seed state with a single button.
-- **Real-Time Telemetry Badges**: Live display of uncached tokens, cached tokens, response latency, and exact cumulative USD spend in the header and message bubbles.
+- **Model Pair & Reranker Router Pill**: Click the header router pill to switch between **Commercial (OpenAI)** and **Local/Open-Weight (Qwen 3)** pairs and pick a cross-pair **Reranker** (`Off`, `Local BGE-M3`, or `Commercial Cohere`); inactive/offline options appear greyed out and disabled.
+- **Clickable Citations & Highlighted Source Passages**: Source citation pills under RAG answers expand inline to show the retrieved section(s), relevance scores (`Rerank %`, `Vec %`, `BM25`, `RRF`), and highlighted excerpts aligned with the answer.
+- **Real-Time Telemetry Badges**: Live display of active model, throughput (`tok/s`), latency percentiles (`P50`/`P95` in tooltip), and cumulative USD spend in the header.
 - **Quick Action Chips**: One-tap sample prompts for sales campaigns, theme restyling, shipping policy updates, and payment gateway configuration.
 
 #### Launching the Web Dashboard:
@@ -270,8 +284,11 @@ npm run ui:build
 #### Backend REST API Endpoints (`src/server.ts`):
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
-| `/api/store` | `GET` | Fetches current live store JSON, changelog snapshots, and telemetry summary. |
-| `/api/chat` | `POST` | Dispatches merchant prompt to `KhadoomAgent` (`{ prompt: string }`). |
+| `/api/store` | `GET` | Fetches current live store JSON, changelog snapshots, telemetry, `modelConfig`, and `routerState`. |
+| `/api/providers` | `GET` | Returns active/inactive status of model pairs, rerankers, and VectorDB mode. |
+| `/api/providers/select` | `POST` | Switches active `modelPair` (`commercial` \| `local`) and/or `reranker` (`none` \| `local` \| `commercial`). |
+| `/api/providers/refresh` | `POST` | Re-probes Qdrant, local Colab/vLLM, and reranker endpoints on demand. |
+| `/api/chat` | `POST` | Dispatches merchant prompt to the active routed `KhadoomAgent` (`{ prompt, conversationId }`). |
 | `/api/staging/accept` | `POST` | Commits staged mutation session to live store (`{ sessionId: string }`). |
 | `/api/staging/reject` | `POST` | Rejects and discards staged mutation session (`{ sessionId: string }`). |
 | `/api/staging/modify` | `POST` | Re-stages mutation incorporating feedback (`{ sessionId, feedback }`). |
@@ -315,7 +332,8 @@ npm start
 | **Cost & Token Monitoring** | Inspect live badges in the Web Dashboard header, call `GET /api/telemetry`, run `/cost` in the CLI, or view `data/logs/query-logs.jsonl`. | Real-time telemetry monitoring uncached vs cached prompt tokens, average latency, and cumulative USD spend. |
 | **Frontend UI Building** | Run `npm run ui:build` after editing React components in `ui/src/`. | Compiles production SPA assets into `ui/dist/` for static serving via `src/server.ts`. |
 | **Telemetry Log Rotation** | Periodically rotate, compress, or truncate `data/logs/query-logs.jsonl` in production. | Standard append-only log maintenance. |
-| **Continuous Verification** | Run `npm test` after any documentation, schema, UI, or algorithm change. | Executes 29 end-to-end automated verification stages in ~3s locally. |
+| **Continuous Verification** | Run `npm test` after any documentation, schema, UI, or algorithm change. | Executes 42 end-to-end automated verification stages in ~3s locally. |
+| **RAG Evaluation (Ragas)** | Run `npm run eval:rag` then `python evals/score_with_ragas.py` (see [`evals/README.md`](evals/README.md)). | Benchmarks `bm25_only`, `vectordb_only`, `hybrid_rrf`, and `hybrid_rrf_rerank` across core Ragas metrics. |
 
 ---
 
@@ -359,18 +377,11 @@ Specific instructions, step-by-step guidance, or technical constraints...
   Remove-Item data/cache/semantic-cache.json -Force
   ```
 
-#### 3. Migrating to a Cloud Vector Database (pgvector / Qdrant)
-In production with multiple agent worker pods, replace the local `FileEmbeddingsStore` with a centralized vector database:
-1. Open [`src/rag/embeddings.ts`](src/rag/embeddings.ts).
-2. Implement the `EmbeddingsStore` interface:
-   ```typescript
-   export interface EmbeddingsStore {
-     loadEmbeddings(): Promise<Map<string, ChunkEmbedding>>;
-     saveEmbeddings(embeddings: Map<string, ChunkEmbedding>, corpusHash: string): Promise<void>;
-     getCorpusHash(): Promise<string | null>;
-   }
-   ```
-3. Pass your new `PgVectorEmbeddingsStore` instance into `DocsService(embeddingsStore)`. The agent, BM25, and RRF rankers remain completely untouched.
+#### 3. Vector Database Setup & Cloud Migration (Qdrant)
+Qdrant is supported out of the box via [`QdrantEmbeddingsStore`](src/rag/qdrant-store.ts):
+1. Start local Qdrant with `docker compose up -d` (uses [`docker-compose.yml`](docker-compose.yml) on port `6333`).
+2. Existing file-backed embeddings (`doc-embeddings.json` / `doc-embeddings-qwen.json`) are automatically migrated into Qdrant collections (`khadoom_docs_openai` / `khadoom_docs_qwen`) on server startup at zero API cost.
+3. For managed Qdrant Cloud or another backend (`pgvector`), set `QDRANT_URL` + `QDRANT_API_KEY` in `.env` or implement the `EmbeddingsStore` interface in [`src/rag/embeddings.ts`](src/rag/embeddings.ts).
 
 #### 4. Lexical Tuning & Regional Dialect Adaptation
 The bilingual BM25 tokenizer in [`src/rag/bm25-search.ts`](src/rag/bm25-search.ts) normalizes Arabic orthography and strips common clitics:
@@ -387,7 +398,7 @@ Run the full end-to-end test suite:
 npm test
 ```
 
-The test suite validates 29 distinct stages:
+The test suite validates 42 distinct stages:
 1. Seed Store Zod schema compliance
 2. Invalid schema rejection (e.g., malformed hex colors)
 3. Snapshot storage & initial v1 changelog creation
@@ -417,40 +428,57 @@ The test suite validates 29 distinct stages:
 27. Live semantic cache file isolation during verification tests
 28. Store-state dynamic inspection cache-poisoning guard
 29. Descending multi-item removals and sequential index-shifting patch compilation
+30. Multi-line YAML frontmatter tag parsing
+31. Lazy vector hydration and empty-store embed skip
+32. Commit-time optimistic concurrency guard (TOCTOU protection)
+33. Bounded multi-turn session memory
+34. Self-correction context preservation, fast conflict fail, and cumulative mutations
+35. Safe malformed tool-call JSON recovery and fenced JSON stripping
+36. Open-weight Colab/vLLM endpoint config, `<think>` stripping, and L4 hourly cost calculation
+37. Per-model throughput (`tok/s`), latency percentiles (`P50`/`P95`), and benchmark aggregation
+38. Modify-proposal `propose_store_changes` forced retry and error guard
+39. Citation passage highlight extraction and semantic cache preservation
+40. Cross-encoder reranker promotion and graceful RRF fallback
+41. `ProviderRouter` availability guards and cross-pair reranker switching
+42. Qdrant deterministic UUIDs and native `querySimilar` VectorDB delegation
 
 ---
 
 ## Quickstart
 
-### 1. Configure Environment
-Create a `.env` file from `.env.example`:
+### 1. Install Dependencies & Build UI
 ```bash
-OPENAI_API_KEY=sk-your-openai-api-key
+npm install
+npm --prefix ui install
+npm run ui:build
 ```
 
-### 2. Embed Documentation Corpus
-Sync and generate vector embeddings for all Markdown documentation guides:
+### 2. Configure Environment (`.env`)
+Copy `.env.example` to `.env` and configure either (or both):
+- **Commercial Pair (OpenAI):** `OPENAI_API_KEY=sk-...` (plus optional `COHERE_API_KEY=...` for commercial reranking)
+- **Local / Self-Hosted Pair (Qwen 3 on Colab L4):** Run Cells 1–4 of [`notebooks/khadoom_qwen3_colab_vllm.ipynb`](notebooks/khadoom_qwen3_colab_vllm.ipynb) and paste the printed `LLM_*`, `EMBEDDING_*`, and `RERANKER_*` variables into `.env`.
+
+### 3. (Optional) Start Qdrant VectorDB & Sync Embeddings
 ```bash
+docker compose up -d
 npm run embed
 ```
-*(Only changed or new chunks will call OpenAI; unchanged chunks are read from cache).*
+*(Syncs configured Commercial and/or Local Qwen embeddings to disk and Qdrant; unchanged chunks cost 0 API calls).*
 
-### 3. Run Verification Tests
+### 4. Run Verification Tests
 ```bash
 npm test
 ```
 
-### 4. Launch the Merchant Interface
+### 5. Launch the Merchant Interface
 
 #### Option A: Web UI Dashboard (Recommended)
-Launch the full-stack server (REST API + React SPA):
 ```bash
 npm run server
 ```
 Then open **`http://localhost:3005`** in your browser.
 
 #### Option B: Terminal CLI
-Run the terminal-based interactive harness:
 ```bash
 npm start
 ```

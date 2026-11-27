@@ -4,18 +4,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 import { DocChunk } from "./doc-loader.js";
+import type { StoreConstraintContext } from "./constraint-filter.js";
 
-export function resolveDefaultEmbeddingsPath(): string {
-  const cwdCandidate = path.join(process.cwd(), "data", "embeddings", "doc-embeddings.json");
+export type EmbeddingsProfile = "commercial" | "local";
+
+export function resolveDefaultEmbeddingsPath(profile: EmbeddingsProfile = "commercial"): string {
+  const filename = profile === "local" ? "doc-embeddings-qwen.json" : "doc-embeddings.json";
+  const cwdCandidate = path.join(process.cwd(), "data", "embeddings", filename);
   if (fsSync.existsSync(cwdCandidate)) {
     return cwdCandidate;
   }
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const pkgRootCandidate = path.resolve(__dirname, "..", "..", "data", "embeddings", "doc-embeddings.json");
+  const pkgRootCandidate = path.resolve(__dirname, "..", "..", "data", "embeddings", filename);
   if (fsSync.existsSync(pkgRootCandidate)) {
     return pkgRootCandidate;
   }
-  const harnessCandidate = path.join(process.cwd(), "khadoom-agent-harness", "data", "embeddings", "doc-embeddings.json");
+  const harnessCandidate = path.join(process.cwd(), "khadoom-agent-harness", "data", "embeddings", filename);
   if (fsSync.existsSync(harnessCandidate)) {
     return harnessCandidate;
   }
@@ -56,10 +60,15 @@ export interface EmbeddingsStore {
   saveEmbeddings(
     embeddings: Map<string, ChunkEmbedding>,
     corpusHash: string,
-    metadata?: { model?: string; dimensions?: number }
+    metadata?: { model?: string; dimensions?: number },
+    chunks?: DocChunk[]
   ): Promise<void>;
   getCorpusHash(): Promise<string | null>;
   getMetadata?(): Promise<EmbeddingsMetadata | null>;
+  querySimilar?(
+    queryVector: number[],
+    options: StoreConstraintContext & { limit: number; minScore?: number }
+  ): Promise<Array<{ chunkId: string; similarity: number }>>;
 }
 
 export class FileEmbeddingsStore implements EmbeddingsStore {
@@ -169,6 +178,9 @@ const KNOWN_MODEL_DIMENSIONS: Record<string, number> = {
   "text-embedding-3-small": 1536,
   "text-embedding-3-large": 3072,
   "text-embedding-ada-002": 1536,
+  "Qwen/Qwen3-Embedding-0.6B": 1024,
+  "qwen3-embedding:0.6b": 1024,
+  "BAAI/bge-m3": 1024,
 };
 
 export function cosineSimilarity(vecA: number[], vecB: number[]): number {
@@ -361,10 +373,15 @@ export class EmbeddingsService {
       storeMeta?.model !== expectedModel ||
       storeMeta?.dimensions !== expectedDim
     ) {
-      await this.store.saveEmbeddings(updatedMap, corpusHash, {
-        model: expectedModel,
-        dimensions: expectedDim,
-      });
+      await this.store.saveEmbeddings(
+        updatedMap,
+        corpusHash,
+        {
+          model: expectedModel,
+          dimensions: expectedDim,
+        },
+        chunks
+      );
     }
 
     this.memoryCache = updatedMap;
@@ -428,6 +445,52 @@ export class EmbeddingsService {
 
   public getCachedVectorCount(): number {
     return this.memoryCache.size;
+  }
+
+  public getStore(): EmbeddingsStore {
+    return this.store;
+  }
+
+  public hasNativeVectorQuery(): boolean {
+    return typeof this.store.querySimilar === "function";
+  }
+
+  /**
+   * Queries either the native VectorDB store (e.g. Qdrant ANN + payload filtering) when available,
+   * or falls back to in-memory cosine similarity across hydrated vectors.
+   */
+  async queryVectors(
+    queryVector: number[],
+    chunks: DocChunk[],
+    allowedChunkIds?: Set<string>,
+    options: StoreConstraintContext & { limit?: number; minScore?: number } = {}
+  ): Promise<VectorScoredChunk[]> {
+    const limit = options.limit ?? 10;
+    const minScore = options.minScore ?? 0;
+
+    if (typeof this.store.querySimilar === "function") {
+      const nativeHits = await this.store.querySimilar(queryVector, {
+        limit,
+        currency: options.currency,
+        country: options.country,
+        minScore,
+      });
+      const chunkMap = new Map(chunks.map((c) => [c.chunkId, c]));
+      const filtered = nativeHits
+        .filter((h) => !allowedChunkIds || allowedChunkIds.has(h.chunkId))
+        .map((h) => ({ chunk: chunkMap.get(h.chunkId), similarity: h.similarity }))
+        .filter((x): x is { chunk: DocChunk; similarity: number } => Boolean(x.chunk));
+
+      return filtered.slice(0, limit).map((item, idx) => ({
+        chunk: item.chunk,
+        similarity: Number(item.similarity.toFixed(6)),
+        rank: idx + 1,
+      }));
+    }
+
+    return this.searchVectors(queryVector, chunks, allowedChunkIds, limit).filter(
+      (r) => r.similarity >= minScore
+    );
   }
 
   searchVectors(

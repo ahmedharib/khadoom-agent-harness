@@ -36,12 +36,18 @@ export {
   DocsService,
   FileEmbeddingsStore,
   InMemoryEmbeddingsStore,
+  RerankerService,
 } from "./rag/docs.service.js";
+export { QdrantEmbeddingsStore } from "./rag/qdrant-store.js";
 export type {
   SearchDocsOptions,
   DocSearchResult,
   CachedDocAnswer,
+  CitationDetail,
+  CitationPassage,
   EmbeddingsStore,
+  EmbeddingsProfile,
+  RerankerMode,
   DocChunk,
   StoreConstraintContext,
 } from "./rag/docs.service.js";
@@ -56,6 +62,13 @@ export {
   expandSemanticPath,
   getValueAtPath,
 } from "./patch/patch-compiler.js";
+
+export { ProviderRouter } from "./routing/provider-router.js";
+export type {
+  ModelPairId,
+  RouterOptionStatus,
+  RouterState,
+} from "./routing/provider-router.js";
 
 export { QueryLoggerService, calculateCost } from "./telemetry/query-logger.js";
 export type {
